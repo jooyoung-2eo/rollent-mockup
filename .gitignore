@@ -1,0 +1,12 @@
+node_modules
+dist
+
+# 환경 변수 (예시 파일은 허용)
+.env
+.env.*
+!.env.example
+
+# 로그와 OS 파일
+*.log
+.DS_Store
+Thumbs.db
