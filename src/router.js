@@ -1,22 +1,26 @@
 import { createRouter, createWebHashHistory, createMemoryHistory } from 'vue-router'
-import { store, addRecent } from './store'
+import { store, currentUser, canEvaluate, logout, toast } from './store'
 import LoginView from './views/LoginView.vue'
-import HomeView from './views/HomeView.vue'
-import TeamView from './views/TeamView.vue'
-import UserView from './views/UserView.vue'
-import ItemView from './views/ItemView.vue'
-import AdminEvalView from './views/AdminEvalView.vue'
+import ProgressView from './views/ProgressView.vue'
+import OrgView from './views/OrgView.vue'
+import EvalSettingsView from './views/EvalSettingsView.vue'
+import KpiView from './views/KpiView.vue'
 import ResultView from './views/ResultView.vue'
+import MyEvalView from './views/MyEvalView.vue'
+import EvaluateView from './views/EvaluateView.vue'
 
+// meta.role: 'admin' 관리자 전용, 'user' 사원·팀장·임원 전용
 const routes = [
-  { path: '/', redirect: '/home' },
-  { path: '/login', name: 'login', component: LoginView, meta: { title: '로그인' } },
-  { path: '/home', name: 'home', component: HomeView, meta: { title: 'HOME' } },
-  { path: '/teams', name: 'teams', component: TeamView, meta: { title: '팀 관리' } },
-  { path: '/users', name: 'users', component: UserView, meta: { title: '사원 관리' } },
-  { path: '/items', name: 'items', component: ItemView, meta: { title: '평가항목' } },
-  { path: '/admin-eval', name: 'admin-eval', component: AdminEvalView, meta: { title: '관리자 평가' } },
-  { path: '/results', name: 'results', component: ResultView, meta: { title: '응답결과' } },
+  { path: '/', redirect: '/login' },
+  { path: '/login', name: 'login', component: LoginView },
+  { path: '/progress', name: 'progress', component: ProgressView, meta: { role: 'admin' } },
+  { path: '/org', name: 'org', component: OrgView, meta: { role: 'admin' } },
+  { path: '/eval-settings', name: 'eval-settings', component: EvalSettingsView, meta: { role: 'admin' } },
+  { path: '/kpi', name: 'kpi', component: KpiView, meta: { role: 'admin' } },
+  { path: '/results', name: 'results', component: ResultView, meta: { role: 'admin' } },
+  { path: '/me', name: 'me', component: MyEvalView, meta: { role: 'user' } },
+  { path: '/me/evaluate/:stage/:targetId', name: 'evaluate', component: EvaluateView, meta: { role: 'user' } },
+  { path: '/:pathMatch(.*)*', redirect: '/login' },
 ]
 
 const router = createRouter({
@@ -25,14 +29,26 @@ const router = createRouter({
   routes,
 })
 
-// 목업: 로그인하지 않았으면 로그인 화면으로 보낸다
-router.beforeEach((to) => {
-  if (to.name !== 'login' && !store.loggedIn) return { name: 'login' }
-  if (to.name === 'login' && store.loggedIn) return { name: 'home' }
-})
+export const homeOf = (kind) => (kind === 'admin' ? '/progress' : '/me')
 
-router.afterEach((to) => {
-  if (to.name !== 'login' && to.name !== 'home') addRecent(to.name)
+// 화면 접근 권한 확인. 프런트엔드 목업 수준의 통제이며 실제 서비스에서는 서버 검증이 필요하다.
+router.beforeEach((to) => {
+  const s = store.session
+  if (s && !currentUser()) logout() // 삭제·비활성화된 계정
+  if (!store.session) return to.name === 'login' ? true : { name: 'login' }
+  if (to.name === 'login') return homeOf(store.session.kind)
+  if (to.meta.role === 'admin' && store.session.kind !== 'admin') {
+    toast('관리자만 사용할 수 있는 화면입니다.', 'warning')
+    return '/me'
+  }
+  if (to.meta.role === 'user' && store.session.kind !== 'user') return '/progress'
+  if (to.name === 'evaluate') {
+    const u = currentUser()
+    if (!u.active || !canEvaluate(u.id, to.params.stage, Number(to.params.targetId))) {
+      toast('나에게 배정되지 않은 평가입니다.', 'warning')
+      return '/me'
+    }
+  }
 })
 
 export default router

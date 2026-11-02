@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import { store } from './store'
 import AppSidebar from './components/AppSidebar.vue'
 import AppModal from './components/AppModal.vue'
+import PrintArea from './components/PrintArea.vue'
 
 const route = useRoute()
 const showShell = computed(() => route.name && route.name !== 'login')
@@ -32,6 +33,8 @@ function closeConfirm(result) {
       </button>
     </template>
   </AppModal>
+
+  <PrintArea />
 
   <div class="toast-stack" aria-live="polite">
     <div v-for="t in store.toasts" :key="t.id" class="toast-item" :class="t.variant">{{ t.message }}</div>

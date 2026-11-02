@@ -119,3 +119,55 @@ button.stage-exec:hover { background: #3d9440; }
 /* 수정·삭제 버튼을 누른 뒤 대상을 고르는 안내 줄 */
 .mode-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; margin-bottom: 10px; background: #f4f7fc; border: 1px solid #d6e3f5; border-radius: 8px; font-size: 0.9rem; }
 .mode-bar.danger { background: #fdf3f3; border-color: #f2d0d0; }
+
+.stage-warn { background: #fff1d6; color: #8a5200; }
+.stage-off { background: #f1f2f5; color: #9aa0b4; }
+.stat { padding: 14px 18px; }
+.stat-label { color: var(--text-muted); font-size: 0.85rem; }
+.stat-value { font-size: 1.5rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+/* ---- 보고서 (화면 미리보기와 인쇄 공통) ---- */
+.report { background: #fff; color: #1d2030; font-size: 12.5px; line-height: 1.5; padding: 8px 4px 24px; }
+.report + .report { border-top: 3px dashed #c9d0de; margin-top: 16px; padding-top: 24px; }
+.report .r-head { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 2px solid #1e2054; padding-bottom: 8px; margin-bottom: 12px; gap: 12px; }
+.report h1 { font-size: 20px; font-weight: 800; margin: 2px 0 0; }
+.report .r-kicker { font-size: 11px; color: #5b6075; letter-spacing: 0.04em; }
+.report .r-meta { font-size: 11px; color: #5b6075; text-align: right; }
+.report h2 { font-size: 14px; font-weight: 800; margin: 16px 0 6px; color: #1e2054; }
+.report h3 { font-size: 12.5px; font-weight: 700; margin: 10px 0 4px; }
+.report table { width: 100%; border-collapse: collapse; margin-bottom: 6px; }
+.report th, .report td { border: 1px solid #bfc5d2; padding: 4px 6px; vertical-align: top; }
+.report th { background: #eef1f6; text-align: left; font-weight: 700; white-space: nowrap; }
+.report .kv th { width: 18%; }
+.report .r { text-align: right; font-variant-numeric: tabular-nums; }
+.report .small { font-size: 11px; }
+.report .total td { font-weight: 800; background: #f6f8fb; }
+.report .grade-box { display: flex; align-items: center; gap: 16px; border: 1px solid #bfc5d2; padding: 10px 14px; }
+.report .grade { font-size: 32px; font-weight: 800; color: #1e2054; min-width: 40px; }
+.report .legend, .report .muted { color: #5b6075; font-size: 11px; }
+.report .pre { white-space: pre-wrap; }
+.report .texts { padding-left: 18px; margin: 0 0 6px; }
+.report .record .line { height: 28px; }
+.report .box { border: 1px solid #8d94a8; height: 150px; margin-top: 8px; padding: 6px 8px; }
+.report .box.small-box { height: 100px; }
+.report .box-title { font-weight: 700; font-size: 12px; }
+
+.print-area { display: none; }
+@media print {
+  @page { size: A4; margin: 14mm; }
+  body { background: #fff !important; }
+  #app > *:not(.print-area) { display: none !important; }
+  .print-area { display: block !important; }
+  .report { padding: 0; break-after: page; }
+  .report + .report { border-top: 0; margin-top: 0; padding-top: 0; }
+  .report tr, .report .box, .report .grade-box { break-inside: avoid; }
+  .report h2, .report h3 { break-after: avoid; }
+}
+
+/* 모든 목록: 데이터 영역만 스크롤하고 열 제목 행은 위에 고정한다 */
+.table-responsive { max-height: 70vh; overflow: auto; }
+.table-responsive > .table > thead > tr > th {
+  position: sticky; top: 0; z-index: 2;
+  background: #f8f9fb;
+  box-shadow: inset 0 -1px 0 #dee2e6; /* 고정된 동안에도 아래 경계선 유지 */
+}
