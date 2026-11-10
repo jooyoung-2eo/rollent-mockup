@@ -3,14 +3,14 @@ import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   db, toast, confirmDialog, teamName, userById, currentUser, canOverride,
-  saveDeptCorrection, savePersonCorrection, saveOverride,
+  savePersonCorrection, saveOverride, periodList, switchPeriod,
 } from '../store'
-import { POLICY_OPTIONS, localDateTime } from '../constants'
-import { computeResults, fmt } from '../scoring'
+import { localDateTime, RATIO_ELEMENTS, ROLE_RATIO_ELEMENTS, roleLabel } from '../constants'
+import { computeResults, fmt, teamKpiData, teamKpiOf, indicatorRate, indicatorScore, ratioCheck } from '../scoring'
 import AppModal from '../components/AppModal.vue'
 
 const route = useRoute()
-const tab = ref(['kpi', 'dept', 'person', 'override', 'history'].includes(route.query.tab) ? route.query.tab : 'kpi')
+const tab = ref(['team', 'ratio', 'person', 'override'].includes(route.query.tab) ? route.query.tab : 'team')
 const results = computed(() => computeResults())
 const resultTeams = computed(() => db.teams.filter((t) => results.value.rows.some((r) => r.user.teamId === t.id)))
 const cell = (v) => (v.value === null ? v.reason : fmt(v.value))
@@ -20,107 +20,91 @@ const avg = (list) => (list.length ? list.reduce((a, b) => a + b, 0) / list.leng
 // 보정 적용 상태 표시
 const APPLIED = {
   none: { text: '보정값 없음', cls: 'text-bg-light border' },
-  saved: { text: '저장됨 · 미적용', cls: 'text-bg-warning' },
   applied: { text: '적용됨', cls: 'text-bg-success' },
   pending: { text: '앞 단계 보류', cls: 'text-bg-secondary' },
 }
 
 // =========================================================
-// 1. KPI 반영 (기존 기능)
+// 1. 팀별 KPI (지표: 목표·실적·가중치 → 달성률 → 환산점수, 또는 점수 직접 입력)
 // =========================================================
-function setKpi(teamId, v) {
-  if (v === '') {
-    delete db.kpiScores[teamId]
-    toast(`${teamName(teamId)} KPI 점수를 지웠습니다.`, 'warning')
-    return
-  }
-  const n = Number(v)
-  if (Number.isNaN(n)) return toast('KPI 점수는 숫자로 입력해 주세요.', 'warning')
-  db.kpiScores[teamId] = n
-  toast(`${teamName(teamId)} KPI 점수를 ${n}점으로 저장했습니다.`)
+const selTeam = ref(db.teams[0]?.id ?? null)
+const selData = computed(() => teamKpiData(selTeam.value))
+const selScore = computed(() => teamKpiOf(selTeam.value))
+const indicators = computed(() => (selData.value?.mode === 'direct' ? [] : selData.value?.indicators ?? []))
+const weightSum = computed(() => Math.round(indicators.value.reduce((a, i) => a + (Number(i.weight) || 0), 0) * 100) / 100)
+function ensureTeam(teamId) {
+  const p = (db.teamKpi[db.period.id] ??= {})
+  return (p[teamId] ??= { mode: 'indicators', direct: null, indicators: [] })
 }
-const teamRows = (teamId) => results.value.rows.filter((r) => r.user.teamId === teamId)
-const teamSummary = (teamId) => {
-  const rows = teamRows(teamId)
-  const applied = rows.filter((r) => r.kpiAfter.value !== null)
-  return { total: rows.length, applied: applied.length, before: avg(applied.map((r) => r.kpiBefore.value)), after: avg(applied.map((r) => r.kpiAfter.value)) }
+function listState(t) {
+  const d = teamKpiData(t.id)
+  if (d?.mode === 'direct') return { sub: '직접 입력', score: teamKpiOf(t.id) }
+  if (!d?.indicators?.length) return { none: true }
+  return { sub: `지표 ${d.indicators.length}개`, score: teamKpiOf(t.id) }
 }
-function setPolicy(key, v) {
-  db.settings[key] = v === '' ? null : key === 'kpiMixRatio' ? Number(v) : v
-  toast('정책 설정을 저장했습니다.')
-}
-const kpiPolicyMissing = computed(() => {
-  const s = db.settings
-  const out = []
-  if (!s.kpiMethod) out.push('KPI 반영 공식')
-  if (!s.kpiBase) out.push('기준 점수')
-  if (s.kpiMethod === 'mix' && typeof s.kpiMixRatio !== 'number') out.push('반영 비율')
-  if (['multiply', 'mix'].includes(s.kpiMethod) && !resultTeams.value.every((t) => typeof db.kpiScores[t.id] === 'number')) out.push('일부 부서 KPI 점수')
-  return out
-})
-const kpiState = (r) => (r.kpiAfter.value !== null ? (db.settings.kpiMethod === 'none' ? '반영 안 함(정책)' : '반영됨') : r.weighted.value === null ? '평가 미완료' : '보류')
-const teamF = ref('all')
-const kpiRows = computed(() => results.value.rows.filter((r) => teamF.value === 'all' || r.user.teamId === teamF.value))
+const pct1 = (v) => (v === null ? '-' : `${(Math.round(v * 10) / 10).toFixed(1)}%`)
+const one = (v) => (v === null || v === undefined ? '-' : (Math.round(v * 10) / 10).toFixed(1))
+const UNITS = ['%', '점', '건', '시간', '일', '원', '명']
 
-// =========================================================
-// 2. 부서별 보정
-// =========================================================
-const deptDraft = ref({})
-function loadDeptDraft() {
-  deptDraft.value = Object.fromEntries(resultTeams.value.map((t) => [t.id, { value: db.deptCorrections[t.id]?.value ?? '', reason: db.deptCorrections[t.id]?.reason ?? '' }]))
+const kForm = ref(null)
+const kError = ref('')
+function openIndicator(ind) {
+  kForm.value = ind ? { ...ind } : { name: '', scope: '전체 직무', target: '', actual: '', unit: '%', direction: 'higher', weight: '' }
+  kError.value = ''
 }
-loadDeptDraft()
-const deptOpen = ref(null)
-const draftNum = (teamId) => {
-  const v = deptDraft.value[teamId]?.value
-  return v === '' || v === null || v === undefined || Number.isNaN(Number(v)) ? null : Number(v)
+function saveIndicator() {
+  const f = kForm.value
+  const num = (v) => (v === '' || v === null ? NaN : Number(v))
+  if (!f.name.trim()) { kError.value = '지표명을 입력해 주세요.'; return }
+  if (!(num(f.target) > 0)) { kError.value = '목표는 0보다 큰 숫자여야 합니다.'; return }
+  if (!(num(f.actual) >= 0)) { kError.value = '실적은 0 이상의 숫자여야 합니다.'; return }
+  if (!(num(f.weight) >= 0 && num(f.weight) <= 100)) { kError.value = '가중치는 0~100 사이 숫자여야 합니다.'; return }
+  const data = { name: f.name.trim(), scope: f.scope.trim() || '전체 직무', target: num(f.target), actual: num(f.actual), unit: f.unit, direction: f.direction, weight: num(f.weight) }
+  const t = ensureTeam(selTeam.value)
+  t.mode = 'indicators'
+  if (f.id) Object.assign(t.indicators.find((i) => i.id === f.id), data)
+  else t.indicators.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), ...data })
+  toast(f.id ? `'${data.name}' 지표를 수정했습니다.` : `'${data.name}' 지표를 추가했습니다.`)
+  kForm.value = null
 }
-const deptDirty = (teamId) => {
-  const saved = db.deptCorrections[teamId]
-  const d = deptDraft.value[teamId] ?? { value: '', reason: '' }
-  return String(saved?.value ?? '') !== String(d.value) || (saved?.reason ?? '') !== d.reason
-}
-// 이 부서 보정값을 단독 적용했을 때의 예상 (입력 중인 값 기준)
-const deptPreview = (teamId) => teamRows(teamId).map((r) => ({
-  row: r,
-  before: r.kpiAfter.value,
-  after: r.kpiAfter.value === null || draftNum(teamId) === null ? null : Math.round((r.kpiAfter.value + draftNum(teamId)) * 100) / 100,
-}))
-const deptApplied = (teamId) => {
-  if (!db.deptCorrections[teamId]) return APPLIED.none
-  const rows = teamRows(teamId)
-  if (rows.some((r) => r.corr.applied === 'applied')) return APPLIED.applied
-  if (rows.every((r) => r.corr.applied === 'pending')) return APPLIED.pending
-  return APPLIED.saved
-}
-
-async function saveDept(team) {
-  const d = deptDraft.value[team.id]
-  if (d.value === '' || Number.isNaN(Number(d.value))) return toast('보정값을 숫자로 입력해 주세요. 0도 입력할 수 있습니다. 값을 없애려면 초기화를 누르세요.', 'warning')
-  const value = Number(d.value)
-  const preview = deptPreview(team.id)
-  const ok = await confirmDialog({
-    title: `${team.name} 부서별 보정값 저장`,
-    message: `${team.name} 직원 ${preview.length}명에게만 연결됩니다. 보정값 ${sign(value)}\n` +
-      `저장해도 개인평가 점수와 KPI 반영 결과는 바뀌지 않습니다.\n` +
-      (db.settings.correctionRule ? `보정 적용 규칙(${POLICY_OPTIONS.correctionRule.find((o) => o.key === db.settings.correctionRule).label})에 따라 결과에 반영됩니다.` : '보정 적용 규칙이 미설정이라 저장만 되고 최종 점수에는 반영되지 않습니다.'),
-    okText: '저장',
-  })
+async function removeIndicator(ind) {
+  const ok = await confirmDialog({ title: '지표 삭제', message: `'${ind.name}' 지표를 삭제합니다.`, okText: '삭제', danger: true })
   if (!ok) return
-  saveDeptCorrection(team.id, value, d.reason.trim(), preview.map((p) => ({ userId: p.row.user.id, name: p.row.user.name, before: p.before, after: p.after })))
-  toast(`${team.name} 부서별 보정값을 저장했습니다.`)
+  const t = ensureTeam(selTeam.value)
+  t.indicators = t.indicators.filter((i) => i.id !== ind.id)
+  toast('지표를 삭제했습니다.')
 }
-async function resetDept(team) {
-  if (!db.deptCorrections[team.id]) { loadDeptDraft(); return }
-  const ok = await confirmDialog({ title: '부서별 보정값 초기화', message: `${team.name}의 보정값(${sign(db.deptCorrections[team.id].value)})을 지워 '미입력' 상태로 되돌립니다. 변경 이력은 남습니다.`, okText: '초기화', danger: true })
-  if (!ok) return
-  saveDeptCorrection(team.id, null, '초기화', [])
-  deptDraft.value[team.id] = { value: '', reason: '' }
-  toast(`${team.name} 부서별 보정값을 초기화했습니다.`, 'warning')
+function setMode(mode) {
+  ensureTeam(selTeam.value).mode = mode
+}
+function setDirect(v) {
+  const t = ensureTeam(selTeam.value)
+  t.direct = v === '' ? null : Number(v)
+  toast(`${teamName(selTeam.value)} KPI 점수를 ${v === '' ? '지웠습니다' : `${Number(v)}점으로 저장했습니다`}.`)
 }
 
 // =========================================================
-// 3. 개인별 보정
+// 직급별 최종 반영 비율
+// =========================================================
+const RATIO_ROLES = ['member', 'leader', 'exec']
+const ELEMENT_ORDER = ['personal', 'kpi']
+const clone = (x) => JSON.parse(JSON.stringify(x))
+const ratioDraft = ref(clone(db.roleRatios))
+const ratioDirty = computed(() => JSON.stringify(ratioDraft.value) !== JSON.stringify(db.roleRatios))
+const activeSum = (role) => Math.round(ROLE_RATIO_ELEMENTS[role].reduce((a, e) => a + (ratioDraft.value[role]?.[e]?.on ? Number(ratioDraft.value[role][e].value) || 0 : 0), 0) * 100) / 100
+const ratioValid = computed(() => RATIO_ROLES.every((r) => ratioCheck(r, ratioDraft.value[r]).valid))
+function setRatioValue(role, e, v) {
+  ratioDraft.value[role][e].value = v === '' ? null : Number(v)
+}
+function saveRatios() {
+  const bad = RATIO_ROLES.filter((r) => !ratioCheck(r, ratioDraft.value[r]).valid)
+  if (bad.length) return toast(`${bad.map(roleLabel).join(', ')}의 활성 합계가 100%가 아닙니다.`, 'warning')
+  db.roleRatios = clone(ratioDraft.value)
+  toast('직급별 반영 비율을 저장했습니다. 결과 계산에 바로 반영됩니다.')
+}
+
+// =========================================================
+// 2. 개인별 보정
 // =========================================================
 const pTeam = ref('all')
 const pQ = ref('')
@@ -157,7 +141,7 @@ function savePerson() {
 }
 
 // =========================================================
-// 4. 최종 점수 직접 수정 (권한 계정만)
+// 3. 최종 점수 직접 수정 (권한 계정만)
 // =========================================================
 const me = computed(() => currentUser())
 const oCandidates = computed(() => results.value.rows.filter((r) => r.weighted.value !== null))
@@ -176,7 +160,7 @@ async function saveOverrideForm() {
   const before = beforeOverride(r)
   const ok = await confirmDialog({
     title: '최종 점수 직접 수정',
-    message: `${r.user.name} (${r.teamName})\n수정 전 최종 점수: ${before.value === null ? `계산 보류 (${before.reason})` : fmt(before.value)}\n수정 후 최종 점수: ${Number(f.score)}\n사유: ${f.reason.trim()}\n\n개인평가 점수·KPI 반영 결과·보정값은 그대로 남습니다.`,
+    message: `${r.user.name} (${r.teamName})\n수정 전 최종 점수: ${before.value === null ? `계산 보류 (${before.reason})` : fmt(before.value)}\n수정 후 최종 점수: ${Number(f.score)}\n사유: ${f.reason.trim()}\n\n개인평가 점수·비율 반영 점수·보정값은 그대로 남습니다.`,
     okText: '수정 저장',
   })
   if (!ok) return
@@ -203,196 +187,135 @@ function cancelOverride() {
   }
 }
 
-// =========================================================
-// 5. 변경 이력
-// =========================================================
-const KIND = { dept: '부서별 보정', person: '개인별 보정', override: '최종 점수 직접 수정', legacy: '이전 방식 조정(보존 기록)' }
-const hKind = ref('all')
-const hQ = ref('')
-const history = computed(() => [...db.auditLog].reverse().filter((a) => (hKind.value === 'all' || a.kind === hKind.value)
-  && (!hQ.value.trim() || (a.userId && userById(a.userId)?.name.includes(hQ.value.trim())) || (a.kind === 'dept' && teamName(a.teamId).includes(hQ.value.trim())))))
-const target = (a) => (a.kind === 'dept' ? `${teamName(a.teamId)} (부서)` : `${userById(a.userId)?.name ?? '(삭제된 직원)'} · ${teamName(userById(a.userId)?.teamId)}`)
-const valText = (a, v) => (a.kind === 'override' ? (v === null ? '없음' : `${v}점`) : a.kind === 'legacy' ? (v ?? '-') : sign(v))
-const scoreText = (v) => (v === null || v === undefined ? '-' : fmt(v))
-const openAffected = ref(null)
 </script>
 
 <template>
   <div>
-    <div class="page-header"><h1 class="page-title">부서 KPI 관리</h1></div>
+    <div class="page-header">
+      <h1 class="page-title">부서 KPI 관리</h1>
+      <div class="period-box">
+        <label class="small text-muted" for="kpi-period">평가 회차</label>
+        <select id="kpi-period" class="form-select form-select-sm w-auto" :value="db.period.id" @change="switchPeriod($event.target.value)"><option v-for="p in periodList()" :key="p.id" :value="p.id">{{ p.name }}</option></select>
+        <span class="small text-muted">기준 기간</span> <strong class="small">{{ db.period.start }} ~ {{ db.period.end }}</strong>
+      </div>
+    </div>
 
     <ul class="nav nav-tabs mb-3">
-      <li class="nav-item"><button class="nav-link" :class="{ active: tab === 'kpi' }" @click="tab = 'kpi'">KPI 반영</button></li>
-      <li class="nav-item"><button class="nav-link" :class="{ active: tab === 'dept' }" @click="tab = 'dept'; loadDeptDraft()">부서별 보정</button></li>
+      <li class="nav-item"><button class="nav-link" :class="{ active: tab === 'team' }" @click="tab = 'team'">팀별 KPI</button></li>
+      <li class="nav-item"><button class="nav-link" :class="{ active: tab === 'ratio' }" @click="tab = 'ratio'; ratioDraft = clone(db.roleRatios)">직급별 비율</button></li>
       <li class="nav-item"><button class="nav-link" :class="{ active: tab === 'person' }" @click="tab = 'person'">개인별 보정</button></li>
       <li class="nav-item"><button class="nav-link" :class="{ active: tab === 'override' }" @click="tab = 'override'">최종 점수 직접 수정</button></li>
-      <li class="nav-item"><button class="nav-link" :class="{ active: tab === 'history' }" @click="tab = 'history'">변경 이력 <span class="badge text-bg-light border">{{ db.auditLog.length }}</span></button></li>
     </ul>
 
-    <!-- ================= 1. KPI 반영 ================= -->
-    <template v-if="tab === 'kpi'">
-      <div class="row g-3 mb-3">
-        <section class="col-lg-6">
-          <div class="panel h-100">
-            <h2 class="panel-title mb-1">부서별 KPI 점수</h2>
-            <p class="panel-sub">개인 평가와 별도로 관리합니다. 입력하면 바로 저장됩니다.</p>
-            <div class="table-responsive">
-            <table class="table table-clean">
-              <thead><tr><th>부서</th><th style="width: 140px">KPI 점수</th><th>적용 현황</th></tr></thead>
-              <tbody>
-                <tr v-for="t in resultTeams" :key="t.id" :data-team="t.name">
-                  <td class="fw-semibold">{{ t.name }}</td>
-                  <td>
-                    <div class="input-group input-group-sm">
-                      <input :id="`kpi-${t.id}`" type="number" class="form-control" :value="db.kpiScores[t.id] ?? ''" placeholder="미입력" :aria-label="`${t.name} KPI 점수`" @change="setKpi(t.id, $event.target.value)" />
-                      <span class="input-group-text">점</span>
-                    </div>
-                  </td>
-                  <td class="small">
-                    {{ teamSummary(t.id).applied }} / {{ teamSummary(t.id).total }}명 반영
-                    <div v-if="teamSummary(t.id).applied" class="text-muted">평균 {{ fmt(teamSummary(t.id).before) }} → {{ fmt(teamSummary(t.id).after) }}</div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+    <!-- ================= 1. 팀별 KPI ================= -->
+    <div v-if="tab === 'team'" class="row g-3">
+      <section class="col-lg-4">
+        <div class="panel">
+          <h2 class="panel-title mb-2">팀별 KPI 점수</h2>
+          <div class="team-list" data-testid="kpi-team-list">
+            <button v-for="t in db.teams" :key="t.id" type="button" class="team-item" :class="{ on: selTeam === t.id }" :data-team="t.name" @click="selTeam = t.id">
+              <span>
+                <strong>{{ t.name }}</strong><span v-if="t.kind === 'exec'" class="small text-muted"> (임원)</span>
+                <span v-if="!listState(t).none" class="d-block small text-muted">{{ listState(t).sub }}</span>
+              </span>
+              <span v-if="listState(t).none" class="badge-none">지표 없음</span>
+              <span v-else-if="listState(t).score.value !== null" class="score"><strong>{{ one(listState(t).score.value) }}</strong>점</span>
+              <span v-else class="small text-warning-emphasis text-end">{{ listState(t).score.reason }}</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section class="col-lg-8">
+        <div v-if="selTeam" class="panel p-0 detail">
+          <div class="detail-head">
+            <div class="text-center">
+              <div class="h5 fw-bold mb-0">{{ teamName(selTeam) }}</div>
+              <div class="small text-muted">{{ selData?.mode === 'direct' ? '직접 입력' : `지표 ${indicators.length}개` }}</div>
+            </div>
+            <div class="text-center">
+              <div class="small text-muted">팀 KPI 점수</div>
+              <div v-if="selScore.value !== null" class="big" data-testid="team-kpi-score">{{ one(selScore.value) }}<small>점</small></div>
+              <div v-else class="small text-warning-emphasis" data-testid="team-kpi-score">{{ selScore.reason }}</div>
+            </div>
+            <div class="d-flex flex-column gap-1 align-items-center">
+              <button v-if="selData?.mode !== 'direct'" class="btn btn-primary add-btn" @click="openIndicator()">+ 지표 추가</button>
+              <button class="btn btn-link btn-sm p-0" @click="setMode(selData?.mode === 'direct' ? 'indicators' : 'direct')">{{ selData?.mode === 'direct' ? '지표로 계산하기' : '점수 직접 입력' }}</button>
             </div>
           </div>
-        </section>
-        <section class="col-lg-6">
-          <div class="panel h-100">
-            <h2 class="panel-title mb-1">KPI 반영 정책</h2>
-            <p class="panel-sub">반영 공식은 아직 정해지지 않았습니다. 미설정이면 KPI 반영 후 점수를 계산하지 않습니다.</p>
-            <div v-if="kpiPolicyMissing.length" class="alert alert-warning small py-2">설정 필요: {{ kpiPolicyMissing.join(', ') }}</div>
-            <div v-else class="alert alert-success small py-2">KPI 반영에 필요한 설정이 모두 되어 있습니다.</div>
-            <div class="mb-2">
-              <label class="form-label small" for="k-method">반영 공식</label>
-              <select id="k-method" class="form-select form-select-sm" :value="db.settings.kpiMethod ?? ''" @change="setPolicy('kpiMethod', $event.target.value)">
-                <option value="">미설정</option>
-                <option v-for="o in POLICY_OPTIONS.kpiMethod" :key="o.key" :value="o.key">{{ o.label }}</option>
-              </select>
-              <div class="small text-muted mt-1">{{ POLICY_OPTIONS.kpiMethod.find((o) => o.key === db.settings.kpiMethod)?.desc ?? '' }}</div>
-            </div>
-            <div class="mb-2">
-              <label class="form-label small" for="k-base">기준 점수 (KPI를 적용할 점수)</label>
-              <select id="k-base" class="form-select form-select-sm" :value="db.settings.kpiBase ?? ''" @change="setPolicy('kpiBase', $event.target.value)">
-                <option value="">미설정</option>
-                <option v-for="o in POLICY_OPTIONS.kpiBase" :key="o.key" :value="o.key">{{ o.label }}</option>
-              </select>
-            </div>
-            <div v-if="db.settings.kpiMethod === 'mix'">
-              <label class="form-label small" for="k-ratio">KPI 반영 비율</label>
-              <div class="input-group input-group-sm" style="max-width: 160px">
-                <input id="k-ratio" type="number" min="0" max="100" class="form-control" :value="db.settings.kpiMixRatio ?? ''" placeholder="미설정" @change="setPolicy('kpiMixRatio', $event.target.value)" />
-                <span class="input-group-text">%</span>
+
+          <div class="detail-body">
+            <div v-if="selData?.mode === 'direct'" class="direct">
+              <label class="form-label" for="kpi-direct">팀 KPI 점수 직접 입력</label>
+              <div class="input-group" style="max-width: 200px">
+                <input id="kpi-direct" type="number" class="form-control" :value="selData.direct ?? ''" placeholder="미입력" @change="setDirect($event.target.value)" />
+                <span class="input-group-text">점</span>
               </div>
             </div>
-          </div>
-        </section>
-      </div>
-      <section class="panel">
-        <div class="panel-head">
-          <h2 class="panel-title">KPI 반영 전후 비교</h2>
-          <select v-model="teamF" class="form-select form-select-sm w-auto" aria-label="부서 필터">
-            <option value="all">전체 부서</option>
-            <option v-for="t in resultTeams" :key="t.id" :value="t.id">{{ t.name }}</option>
-          </select>
-        </div>
-        <div class="table-responsive scroll">
-          <table class="table table-clean table-sm" data-testid="kpi-table">
-            <thead><tr><th>이름</th><th>부서</th><th class="text-end">개인평가 점수</th><th class="text-end">KPI 반영 전</th><th class="text-end">부서 KPI</th><th>KPI 반영 여부</th><th class="text-end">KPI 반영 후</th></tr></thead>
-            <tbody>
-              <tr v-for="r in kpiRows" :key="r.user.id" :data-user="r.user.name">
-                <td class="fw-semibold">{{ r.user.name }}</td>
-                <td>{{ r.teamName }}</td>
-                <td class="text-end num" :class="{ muted: r.weighted.value === null }">{{ cell(r.weighted) }}</td>
-                <td class="text-end num" :class="{ muted: r.kpiBefore.value === null }">{{ cell(r.kpiBefore) }}</td>
-                <td class="text-end num">{{ r.kpiScore ?? '-' }}</td>
-                <td><span class="badge" :class="kpiState(r) === '반영됨' ? 'text-bg-success' : kpiState(r) === '보류' ? 'text-bg-warning' : 'text-bg-light border'">{{ kpiState(r) }}</span></td>
-                <td class="text-end num" :class="{ muted: r.kpiAfter.value === null }">{{ cell(r.kpiAfter) }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <p class="panel-sub mt-2 mb-0">KPI 반영 결과는 개인평가 점수와 따로 저장되며, KPI 설정을 바꿔도 평가 응답과 개인평가 점수는 바뀌지 않습니다.</p>
-      </section>
-    </template>
-
-    <!-- 보정 적용 규칙 (부서별·개인별 탭 공통) -->
-    <section v-if="tab === 'dept' || tab === 'person'" class="panel mb-3 rule-card">
-      <div class="d-flex flex-wrap gap-3 align-items-center">
-        <div>
-          <strong>보정 적용 규칙</strong>
-          <div class="small text-muted">부서별 보정값과 개인별 보정값을 최종 점수에 어떻게 반영할지 정합니다.</div>
-        </div>
-        <select id="c-rule" class="form-select form-select-sm w-auto" :value="db.settings.correctionRule ?? ''" aria-label="보정 적용 규칙" @change="setPolicy('correctionRule', $event.target.value)">
-          <option value="">미설정</option>
-          <option v-for="o in POLICY_OPTIONS.correctionRule" :key="o.key" :value="o.key">{{ o.label }}</option>
-        </select>
-        <span v-if="!db.settings.correctionRule" class="badge text-bg-warning">미설정: 보정값은 저장만 되고 최종 점수에 반영되지 않습니다</span>
-        <span v-else class="small text-muted">{{ POLICY_OPTIONS.correctionRule.find((o) => o.key === db.settings.correctionRule).desc }}</span>
-      </div>
-      <p class="small text-muted mt-2 mb-0">보정값은 KPI 반영 후 점수에 더하는 점수(±)입니다. 아래 '예상 점수'는 그 보정값 하나만 적용했을 때의 값이며, 두 보정값을 합치는 계산은 규칙이 정해진 뒤에만 합니다.</p>
-    </section>
-
-    <!-- ================= 2. 부서별 보정 ================= -->
-    <section v-if="tab === 'dept'" class="panel">
-      <h2 class="panel-title mb-2">부서별 보정값</h2>
-      <div class="table-responsive">
-        <table class="table table-clean align-middle" data-testid="dept-table">
-          <thead>
-            <tr><th>부서</th><th class="text-end">직원 수</th><th class="text-end">평균 개인평가</th><th class="text-end">평균 KPI 반영 후</th><th style="width: 130px">보정값</th><th>사유 (선택)</th><th>저장</th><th>적용</th><th></th></tr>
-          </thead>
-          <tbody>
-            <template v-for="t in resultTeams" :key="t.id">
-              <tr :data-team="t.name">
-                <td class="fw-semibold">{{ t.name }}</td>
-                <td class="text-end">{{ teamRows(t.id).length }}명</td>
-                <td class="text-end num">{{ fmt(avg(teamRows(t.id).map((r) => r.weighted.value).filter((x) => x !== null))) }}</td>
-                <td class="text-end num">{{ fmt(avg(teamRows(t.id).map((r) => r.kpiAfter.value).filter((x) => x !== null))) }}</td>
-                <td>
-                  <div class="input-group input-group-sm">
-                    <input v-model="deptDraft[t.id].value" type="number" step="0.5" class="form-control" placeholder="미입력" :aria-label="`${t.name} 보정값`" />
-                    <span class="input-group-text">점</span>
-                  </div>
-                </td>
-                <td><input v-model="deptDraft[t.id].reason" class="form-control form-control-sm" :aria-label="`${t.name} 보정 사유`" /></td>
-                <td class="small text-nowrap">
-                  <span v-if="deptDirty(t.id)" class="badge text-bg-info">저장 안 됨</span>
-                  <span v-else-if="db.deptCorrections[t.id]" class="badge text-bg-primary">저장됨 {{ sign(db.deptCorrections[t.id].value) }}</span>
-                  <span v-else class="badge text-bg-light border">미입력</span>
-                </td>
-                <td><span class="badge" :class="deptApplied(t.id).cls">{{ deptApplied(t.id).text }}</span></td>
-                <td class="text-end text-nowrap">
-                  <button class="btn btn-link btn-sm p-0 me-2" @click="deptOpen = deptOpen === t.id ? null : t.id">{{ deptOpen === t.id ? '영향 닫기' : '영향 보기' }}</button>
-                  <button class="btn btn-primary btn-sm me-1" @click="saveDept(t)">저장</button>
-                  <button class="btn btn-light border btn-sm" @click="resetDept(t)">초기화</button>
-                </td>
-              </tr>
-              <tr v-if="deptOpen === t.id" class="preview-row">
-                <td colspan="9">
-                  <div class="small mb-1"><strong>{{ t.name }}</strong> 직원에게만 연결됩니다. 입력 중인 보정값 <strong>{{ draftNum(t.id) === null ? '미입력' : sign(draftNum(t.id)) }}</strong>을 단독 적용했을 때의 예상입니다.</div>
-                  <table class="table table-sm mb-0 small" data-testid="dept-preview">
-                    <thead><tr><th>이름</th><th class="text-end">개인평가 점수</th><th class="text-end">보정 적용 전 (KPI 반영 후)</th><th class="text-end">부서 보정 적용 후 예상</th><th class="text-end">현재 보정 적용 결과</th></tr></thead>
-                    <tbody>
-                      <tr v-for="p in deptPreview(t.id)" :key="p.row.user.id">
-                        <td>{{ p.row.user.name }}</td>
-                        <td class="text-end num">{{ cell(p.row.weighted) }}</td>
-                        <td class="text-end num">{{ cell(p.row.kpiAfter) }}</td>
-                        <td class="text-end num expected">{{ p.after === null ? '-' : fmt(p.after) }}</td>
-                        <td class="text-end num">{{ cell(p.row.corrected) }}</td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </td>
-              </tr>
+            <template v-else>
+              <div v-for="ind in indicators" :key="ind.id" class="ind" :data-indicator="ind.name">
+                <div class="d-flex align-items-center gap-2 mb-2">
+                  <h3 class="ind-name">{{ ind.name }}</h3>
+                  <span class="small text-muted fw-semibold">{{ ind.scope }}</span>
+                  <button class="btn btn-outline-primary btn-sm ms-auto" @click="openIndicator(ind)">✎ 수정</button>
+                  <button class="btn btn-outline-danger btn-sm" @click="removeIndicator(ind)">✕ 삭제</button>
+                </div>
+                <div class="cards">
+                  <div class="kcard"><div class="k">목표</div><div class="v">{{ ind.target }}{{ ind.unit }}</div></div>
+                  <div class="kcard"><div class="k">실적</div><div class="v">{{ ind.actual ?? '미입력' }}{{ ind.actual === null || ind.actual === undefined ? '' : ind.unit }}</div></div>
+                  <div class="kcard"><div class="k">달성률</div><div class="v rate">{{ pct1(indicatorRate(ind)) }}</div></div>
+                  <div class="kcard"><div class="k">가중치</div><div class="v">{{ ind.weight }}%</div></div>
+                </div>
+                <div class="small mt-2">
+                  <span class="text-muted">{{ ind.direction === 'lower' ? '낮을수록 좋음 (목표 ÷ 실적)' : '높을수록 좋음 (실적 ÷ 목표)' }}</span>
+                  <span class="ms-3">환산점수 <strong>{{ one(indicatorScore(ind)) }}</strong></span>
+                </div>
+              </div>
+              <div v-if="!indicators.length" class="empty-hint">등록된 지표가 없습니다. '+ 지표 추가'로 지표를 만드세요.</div>
+              <div v-else class="text-end small pt-2">가중치 합계 <strong :class="weightSum === 100 ? 'text-success' : 'text-danger'">{{ weightSum }}%</strong></div>
             </template>
+          </div>
+        </div>
+        <p class="panel-sub mt-2 mb-0">팀 KPI 점수 = Σ(지표 환산점수 × 가중치). 환산점수는 달성률이며 최대 100점입니다. 이 점수는 직급별 비율에 따라 개인평가 점수에 반영됩니다.</p>
+      </section>
+    </div>
+
+    <!-- ================= 직급별 비율 ================= -->
+    <section v-if="tab === 'ratio'" class="panel p-0">
+      <h2 class="panel-title px-3 pt-3 mb-2">직급별 부서 KPI 반영 비율</h2>
+      <div class="table-responsive">
+        <table class="table ratio-table mb-0" data-testid="ratio-table">
+          <thead><tr><th class="text-center">직급</th><th class="text-center">반영 요소</th><th class="text-center">활성 합계</th></tr></thead>
+          <tbody>
+            <tr v-for="role in RATIO_ROLES" :key="role" :data-role="role">
+              <td class="text-center fw-semibold">{{ roleLabel(role) }}</td>
+              <td>
+                <div class="elements">
+                  <span v-for="e in ELEMENT_ORDER" :key="e" class="el">
+                    <template v-if="ROLE_RATIO_ELEMENTS[role].includes(e)">
+                      <input :id="`r-${role}-${e}-on`" v-model="ratioDraft[role][e].on" type="checkbox" class="form-check-input" />
+                      <label :for="`r-${role}-${e}-on`" :title="RATIO_ELEMENTS[e].desc">{{ RATIO_ELEMENTS[e].label }}</label>
+                      <input
+                        :id="`r-${role}-${e}`" type="number" min="0" max="100" class="form-control form-control-sm pct"
+                        :value="ratioDraft[role][e].value ?? ''" :disabled="!ratioDraft[role][e].on" :aria-label="`${roleLabel(role)} ${RATIO_ELEMENTS[e].label} 비율`"
+                        @input="setRatioValue(role, e, $event.target.value)"
+                      />%
+                    </template>
+                  </span>
+                </div>
+              </td>
+              <td class="text-center" :class="activeSum(role) === 100 ? 'text-success' : 'text-danger fw-bold'" :data-sum="role">{{ activeSum(role) }}%</td>
+            </tr>
           </tbody>
         </table>
       </div>
-      <p class="panel-sub mt-2 mb-0">보정값을 비워 두면 '미입력'이며 0과 다릅니다. 저장·초기화는 모두 변경 이력에 남고, 개인평가 점수와 KPI 반영 결과는 바뀌지 않습니다.</p>
+      <div class="d-flex align-items-center p-3 border-top">
+        <span class="small text-muted me-auto">개인평가 = 1·2·3차 평가 단계 점수를 단계 가중치로 합친 점수 (팀장의 팀원평가, 임원의 상향평가 포함)</span>
+        <button class="btn btn-primary" :disabled="!ratioDirty || !ratioValid" @click="saveRatios">저장</button>
+      </div>
     </section>
 
-    <!-- ================= 3. 개인별 보정 ================= -->
+    <!-- ================= 2. 개인별 보정 ================= -->
     <section v-if="tab === 'person'" class="panel">
       <div class="panel-head">
         <h2 class="panel-title">개인별 보정값</h2>
@@ -409,8 +332,8 @@ const openAffected = ref(null)
         <table class="table table-clean table-sm" data-testid="person-table">
           <thead>
             <tr>
-              <th>이름</th><th>부서</th><th class="text-end">개인평가</th><th class="text-end">백분위</th><th class="text-end">KPI 반영 후 (보정 전)</th>
-              <th class="text-end">부서 보정</th><th class="text-end">개인 보정</th><th class="text-end">개인 보정 적용 예상</th><th class="text-end">보정 적용 결과</th><th>사유</th><th>상태</th><th></th>
+              <th>이름</th><th>부서</th><th class="text-end">개인평가</th><th class="text-end">KPI 반영 후 (보정 전)</th>
+              <th class="text-end">개인 보정</th><th class="text-end">보정 적용 결과</th><th>사유</th><th>상태</th><th></th>
             </tr>
           </thead>
           <tbody>
@@ -418,11 +341,8 @@ const openAffected = ref(null)
               <td class="fw-semibold">{{ r.user.name }}</td>
               <td>{{ r.teamName }}</td>
               <td class="text-end num" :class="{ muted: r.weighted.value === null }">{{ cell(r.weighted) }}</td>
-              <td class="text-end num" :class="{ muted: r.percentile.value === null }">{{ cell(r.percentile) }}</td>
               <td class="text-end num" :class="{ muted: r.kpiAfter.value === null }">{{ cell(r.kpiAfter) }}</td>
-              <td class="text-end num">{{ sign(r.corr.dept) }}</td>
               <td class="text-end num fw-semibold">{{ sign(r.corr.person) }}</td>
-              <td class="text-end num expected">{{ r.corr.expectPerson === null ? '-' : fmt(r.corr.expectPerson) }}</td>
               <td class="text-end num" :class="{ muted: r.corrected.value === null }">{{ cell(r.corrected) }}</td>
               <td class="small reason">{{ r.corr.personReason || '-' }}</td>
               <td><span class="badge" :class="APPLIED[r.corr.applied].cls">{{ APPLIED[r.corr.applied].text }}</span></td>
@@ -434,17 +354,17 @@ const openAffected = ref(null)
           </tbody>
         </table>
       </div>
-      <p class="panel-sub mt-2 mb-0">개인별 보정값은 그 직원에게만 연결됩니다. '보정 적용 결과'는 보정 적용 규칙이 정해진 뒤에만 계산되며, 그 전에는 '보정 적용 규칙 미설정'으로 보류됩니다.</p>
+      <p class="panel-sub mt-2 mb-0">개인별 보정값은 그 직원에게만 연결되며, 부서 KPI 반영 점수에 더해(±) 바로 반영됩니다. 비워 두면 '미입력'이며 0과 다릅니다.</p>
     </section>
 
-    <!-- ================= 4. 최종 점수 직접 수정 ================= -->
+    <!-- ================= 3. 최종 점수 직접 수정 ================= -->
     <template v-if="tab === 'override'">
       <section class="panel mb-3">
         <h2 class="panel-title mb-1">최종 점수 직접 수정</h2>
-        <p class="panel-sub">대표자 등 권한이 있는 계정이 최종 결과를 검토한 뒤 최종 점수를 직접 정합니다. 보정과는 별개이며, 개인평가 점수·KPI 결과·보정값을 덮어쓰지 않습니다.</p>
-        <div class="alert alert-secondary small py-2">허용 범위와 승인 절차는 정해지지 않았습니다. 범위를 제한하지 않고, 승인 단계 없이 저장 즉시 반영되며, 모든 수정은 변경 이력에 남습니다.</div>
+        <p class="panel-sub">관리자가 최종 결과를 검토한 뒤 최종 점수를 직접 정합니다. 보정과는 별개이며, 개인평가 점수·KPI 결과·보정값을 덮어쓰지 않습니다.</p>
+        <div class="alert alert-secondary small py-2">허용 범위와 승인 절차는 정해지지 않았습니다. 범위를 제한하지 않고, 승인 단계 없이 저장 즉시 반영됩니다.</div>
         <div v-if="!canOverride()" class="alert alert-warning small py-2" data-testid="no-permission">
-          현재 계정({{ me?.name }})에는 최종 점수 직접 수정 권한이 없습니다. 권한이 있는 계정(대표자)으로 로그인해야 수정할 수 있습니다. 아래 수정 내역은 볼 수 있습니다.
+          현재 계정({{ me?.name }})에는 최종 점수 직접 수정 권한이 없습니다. 권한이 있는 관리자 계정으로 로그인해야 수정할 수 있습니다. 아래 수정 내역은 볼 수 있습니다.
         </div>
         <div v-else class="override-form">
           <div>
@@ -493,74 +413,69 @@ const openAffected = ref(null)
       </section>
     </template>
 
-    <!-- ================= 5. 변경 이력 ================= -->
-    <section v-if="tab === 'history'" class="panel">
-      <div class="panel-head">
-        <h2 class="panel-title">보정·점수 변경 이력</h2>
-        <div class="d-flex gap-2">
-          <input v-model="hQ" class="form-control form-control-sm" style="width: 160px" placeholder="직원·부서 검색" aria-label="이력 검색" />
-          <select v-model="hKind" class="form-select form-select-sm w-auto" aria-label="변경 유형">
-            <option value="all">전체 유형</option>
-            <option v-for="(label, key) in KIND" :key="key" :value="key">{{ label }}</option>
+    <!-- 팀 KPI 지표 추가·수정 -->
+    <AppModal v-if="kForm" :title="kForm.id ? '지표 수정' : `${teamName(selTeam)} 지표 추가`" @close="kForm = null">
+      <div class="row g-3">
+        <div class="col-8">
+          <label class="form-label" for="k-name">지표명 <span class="text-danger">*</span></label>
+          <input id="k-name" v-model="kForm.name" class="form-control" placeholder="예: 과제 달성률" />
+        </div>
+        <div class="col-4">
+          <label class="form-label" for="k-scope">적용 직무</label>
+          <input id="k-scope" v-model="kForm.scope" class="form-control" />
+        </div>
+        <div class="col-4">
+          <label class="form-label" for="k-target">목표 <span class="text-danger">*</span></label>
+          <input id="k-target" v-model="kForm.target" type="number" step="any" class="form-control" />
+        </div>
+        <div class="col-4">
+          <label class="form-label" for="k-actual">실적 <span class="text-danger">*</span></label>
+          <input id="k-actual" v-model="kForm.actual" type="number" step="any" class="form-control" />
+        </div>
+        <div class="col-4">
+          <label class="form-label" for="k-unit">단위</label>
+          <select id="k-unit" v-model="kForm.unit" class="form-select">
+            <option v-for="u in UNITS" :key="u" :value="u">{{ u }}</option>
           </select>
         </div>
+        <div class="col-8">
+          <label class="form-label" for="k-direction">평가 방향</label>
+          <select id="k-direction" v-model="kForm.direction" class="form-select">
+            <option value="higher">높을수록 좋음 (실적 ÷ 목표)</option>
+            <option value="lower">낮을수록 좋음 (목표 ÷ 실적)</option>
+          </select>
+        </div>
+        <div class="col-4">
+          <label class="form-label" for="k-weight">가중치 <span class="text-danger">*</span></label>
+          <div class="input-group">
+            <input id="k-weight" v-model="kForm.weight" type="number" min="0" max="100" class="form-control" />
+            <span class="input-group-text">%</span>
+          </div>
+        </div>
       </div>
-      <div class="table-responsive scroll">
-        <table class="table table-clean table-sm" data-testid="audit-table">
-          <thead><tr><th>시각</th><th>유형</th><th>대상</th><th class="text-end">변경 전 값</th><th class="text-end">변경 후 값</th><th class="text-end">변경 전 점수</th><th class="text-end">변경 후 점수</th><th>사유</th><th>변경자</th></tr></thead>
-          <tbody>
-            <template v-for="a in history" :key="a.id">
-              <tr :data-kind="a.kind">
-                <td class="text-nowrap small">{{ localDateTime(a.at) }}</td>
-                <td><span class="badge" :class="{ dept: 'text-bg-primary', person: 'text-bg-info', override: 'text-bg-danger', legacy: 'text-bg-secondary' }[a.kind]">{{ KIND[a.kind] }}</span></td>
-                <td>{{ target(a) }}</td>
-                <td class="text-end num">{{ valText(a, a.beforeValue) }}</td>
-                <td class="text-end num">{{ valText(a, a.afterValue) }}</td>
-                <template v-if="a.kind === 'dept'">
-                  <td colspan="2" class="text-end small">
-                    <button v-if="a.affected?.length" class="btn btn-link btn-sm p-0" @click="openAffected = openAffected === a.id ? null : a.id">영향 {{ a.affected.length }}명 {{ openAffected === a.id ? '닫기' : '보기' }}</button>
-                    <span v-else class="text-muted">-</span>
-                  </td>
-                </template>
-                <template v-else>
-                  <td class="text-end num">{{ scoreText(a.beforeScore) }}</td>
-                  <td class="text-end num">{{ scoreText(a.afterScore) }}</td>
-                </template>
-                <td class="small">{{ a.reason || '-' }}</td>
-                <td class="small text-nowrap">{{ a.by }}</td>
-              </tr>
-              <tr v-if="openAffected === a.id" class="preview-row">
-                <td colspan="9" class="small">
-                  <span v-for="x in a.affected" :key="x.userId" class="me-3">{{ x.name }} {{ scoreText(x.before) }} → {{ scoreText(x.after) }}</span>
-                  <div class="text-muted">당시 '부서 보정값만 적용했을 때' 예상 점수입니다.</div>
-                </td>
-              </tr>
-            </template>
-            <tr v-if="!history.length"><td colspan="9" class="text-muted">변경 이력이 없습니다.</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <p class="panel-sub mt-2 mb-0">
-        이력은 지우지 않고 계속 쌓입니다. 다만 이 목업은 브라우저 localStorage에 저장하므로, 다른 기기와 공유되지 않고 개발자 도구로 바꿀 수 있어 실제 감사 로그나 위변조 방지를 보장하지 않습니다.
-        개인별 보정의 점수는 '그 보정값 하나만 적용했을 때' 예상 점수입니다.
-      </p>
-    </section>
+      <p class="small text-muted mt-3 mb-0">달성률이 100%를 넘어도 환산점수는 100점까지만 반영합니다. 팀의 지표 가중치 합계가 100%여야 팀 KPI 점수가 계산됩니다.</p>
+      <div v-if="kError" class="text-danger small mt-2" role="alert">{{ kError }}</div>
+      <template #footer>
+        <button class="btn btn-light" @click="kForm = null">취소</button>
+        <button class="btn btn-primary" @click="saveIndicator">저장</button>
+      </template>
+    </AppModal>
 
     <!-- 개인별 보정 입력 -->
     <AppModal v-if="pForm" :title="`${pRow.user.name} 개인별 보정${pForm.mode === 'reset' ? ' 초기화' : ''}`" @close="pForm = null">
       <table class="table table-sm small mb-3">
         <tbody>
-          <tr><th>개인평가 점수</th><td>{{ cell(pRow.weighted) }}</td><th>백분위</th><td>{{ cell(pRow.percentile) }}</td></tr>
-          <tr><th>KPI 반영 후 (보정 전)</th><td>{{ cell(pRow.kpiAfter) }}</td><th>부서 보정 ({{ pRow.teamName }})</th><td>{{ sign(pRow.corr.dept) }}</td></tr>
+          <tr><th>개인평가 점수</th><td colspan="3">{{ cell(pRow.weighted) }}</td></tr>
+          <tr><th>KPI 반영 후 (보정 전)</th><td colspan="3">{{ cell(pRow.kpiAfter) }}</td></tr>
           <tr><th>현재 개인 보정</th><td>{{ sign(pRow.corr.person) }}</td><th>보정 적용 결과</th><td>{{ cell(pRow.corrected) }}</td></tr>
         </tbody>
       </table>
       <template v-if="pForm.mode === 'save'">
         <label class="form-label" for="p-value">개인별 보정값 (점, ±)</label>
         <input id="p-value" v-model="pForm.value" type="number" step="0.5" class="form-control mb-2" placeholder="예: 1.5 또는 -2" />
-        <div class="small mb-2">이 보정값만 적용했을 때 예상: <strong class="expected">{{ pExpected === null ? '-' : fmt(pExpected) }}</strong></div>
+        <div class="small mb-2">보정 적용 후 예상: <strong class="expected">{{ pExpected === null ? '-' : fmt(pExpected) }}</strong></div>
       </template>
-      <p v-else class="small">개인별 보정값({{ sign(pRow.corr.person) }})을 지워 '미입력' 상태로 되돌립니다. 이전 기록은 변경 이력에 남습니다.</p>
+      <p v-else class="small">개인별 보정값({{ sign(pRow.corr.person) }})을 지워 '미입력' 상태로 되돌립니다. </p>
       <label class="form-label" for="p-reason">{{ pForm.mode === 'reset' ? '초기화' : '보정' }} 사유 <span class="text-danger">*</span></label>
       <input id="p-reason" v-model="pForm.reason" class="form-control" />
       <div v-if="pError" class="text-danger small mt-2" role="alert">{{ pError }}</div>
@@ -591,6 +506,58 @@ const openAffected = ref(null)
 .reason { max-width: 180px; }
 .rule-card { padding: 12px 18px; }
 .preview-row td { background: #f6f8fc; }
+.period-box { display: flex; align-items: center; gap: 10px; background: #fff; border: 1px solid var(--card-border); border-radius: 12px; padding: 8px 14px; flex-wrap: wrap; }
+.team-list { display: flex; flex-direction: column; gap: 4px; }
+.team-item { display: flex; justify-content: space-between; align-items: center; gap: 8px; text-align: left; border: 1px solid transparent; background: none; border-radius: 10px; padding: 10px 12px; }
+.team-item:hover { background: #f4f7fc; }
+.team-item.on { background: #e3f1f8; border-color: #a9d3e6; }
+.team-item .score strong { font-size: 1.15rem; font-variant-numeric: tabular-nums; }
+.badge-none { background: #fde8e8; color: #b42318; border: 1px solid #f5b5b5; border-radius: 999px; padding: 2px 10px; font-size: 0.85rem; white-space: nowrap; }
+.detail { overflow: hidden; }
+.detail-head { display: grid; grid-template-columns: 1fr 1fr 1fr; align-items: center; gap: 12px; padding: 18px 20px; background: #f4f6fa; border-bottom: 1px solid var(--card-border); }
+.big { font-size: 2rem; font-weight: 800; color: var(--navy); font-variant-numeric: tabular-nums; line-height: 1.1; }
+.big small { font-size: 0.85rem; font-weight: 600; margin-left: 2px; }
+.add-btn { background: linear-gradient(135deg, #1f5fae, #1e2054); border: 0; font-weight: 700; padding: 8px 18px; }
+.detail-body { padding: 16px 20px; }
+.ind { padding: 12px 0 16px; border-bottom: 1px solid var(--card-border); }
+.ind-name { font-size: 1.05rem; font-weight: 700; margin: 0; }
+.cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+@media (max-width: 700px) { .cards { grid-template-columns: 1fr 1fr; } .detail-head { grid-template-columns: 1fr; } }
+.kcard { background: #f3f4f7; border-radius: 10px; padding: 10px 14px; }
+.kcard .k { color: #4a4f63; font-size: 0.9rem; }
+.kcard .v { font-size: 1.25rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.kcard .v.rate { color: #2a8fa0; }
+.ratio-table th { background: #f1f4f9; }
+.ratio-table td { vertical-align: middle; }
+.elements { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.el { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+.el .pct { width: 70px; text-align: center; }
 .override-form { display: grid; grid-template-columns: 2fr 1fr 3fr auto; gap: 10px; }
-@media (max-width: 900px) { .override-form { grid-template-columns: 1fr 1fr; } .reason-col { grid-column: 1 / -1; } }
+@media (max-width: 900px) { .period-box { display: flex; align-items: center; gap: 10px; background: #fff; border: 1px solid var(--card-border); border-radius: 12px; padding: 8px 14px; flex-wrap: wrap; }
+.team-list { display: flex; flex-direction: column; gap: 4px; }
+.team-item { display: flex; justify-content: space-between; align-items: center; gap: 8px; text-align: left; border: 1px solid transparent; background: none; border-radius: 10px; padding: 10px 12px; }
+.team-item:hover { background: #f4f7fc; }
+.team-item.on { background: #e3f1f8; border-color: #a9d3e6; }
+.team-item .score strong { font-size: 1.15rem; font-variant-numeric: tabular-nums; }
+.badge-none { background: #fde8e8; color: #b42318; border: 1px solid #f5b5b5; border-radius: 999px; padding: 2px 10px; font-size: 0.85rem; white-space: nowrap; }
+.detail { overflow: hidden; }
+.detail-head { display: grid; grid-template-columns: 1fr 1fr 1fr; align-items: center; gap: 12px; padding: 18px 20px; background: #f4f6fa; border-bottom: 1px solid var(--card-border); }
+.big { font-size: 2rem; font-weight: 800; color: var(--navy); font-variant-numeric: tabular-nums; line-height: 1.1; }
+.big small { font-size: 0.85rem; font-weight: 600; margin-left: 2px; }
+.add-btn { background: linear-gradient(135deg, #1f5fae, #1e2054); border: 0; font-weight: 700; padding: 8px 18px; }
+.detail-body { padding: 16px 20px; }
+.ind { padding: 12px 0 16px; border-bottom: 1px solid var(--card-border); }
+.ind-name { font-size: 1.05rem; font-weight: 700; margin: 0; }
+.cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+@media (max-width: 700px) { .cards { grid-template-columns: 1fr 1fr; } .detail-head { grid-template-columns: 1fr; } }
+.kcard { background: #f3f4f7; border-radius: 10px; padding: 10px 14px; }
+.kcard .k { color: #4a4f63; font-size: 0.9rem; }
+.kcard .v { font-size: 1.25rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.kcard .v.rate { color: #2a8fa0; }
+.ratio-table th { background: #f1f4f9; }
+.ratio-table td { vertical-align: middle; }
+.elements { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.el { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+.el .pct { width: 70px; text-align: center; }
+.override-form { grid-template-columns: 1fr 1fr; } .reason-col { grid-column: 1 / -1; } }
 </style>

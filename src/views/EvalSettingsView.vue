@@ -3,14 +3,16 @@ import { computed, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import {
   db, toast, confirmDialog, responseCount, userById, teamName, sortUsers, isEvalTarget, stagesFor, evaluatorsFor,
-  leadersOf, membersOf, execSourceOf, commitItems,
+  leadersOf, membersOf, execSourceOf, commitItems, periodList, switchPeriod, clonePeriod, deletePeriod,
 } from '../store'
 import { STAGES, STAGE_KEYS, ROLE_STAGES, ANSWER_TYPES, DEFAULT_CHOICE_LABELS, POLICY_OPTIONS, roleLabel, stageLabel } from '../constants'
 import { weightCheck, computeResults } from '../scoring'
-import { POLICIES, blockedCount, getPath, setPath } from '../policies'
+import { POLICIES, getPath, setPath } from '../policies'
 import { pointsReport, totalText, POINTS_TARGET } from '../points'
 import InlineText from '../components/InlineText.vue'
+import AppModal from '../components/AppModal.vue'
 import QuestionSettings from '../components/QuestionSettings.vue'
+import QuestionCsvImport from '../components/QuestionCsvImport.vue'
 import ExecAssignModal from '../components/ExecAssignModal.vue'
 
 const route = useRoute()
@@ -18,10 +20,9 @@ const router = useRouter()
 const tab = ref(['questions', 'stages', 'weights', 'policies'].includes(route.query.tab) ? route.query.tab : 'questions')
 
 // =========================================================
-// 0. 정책 설정 현황
+// 0. 정책 설정
 // =========================================================
-const policyResults = computed(() => computeResults())
-const policyRows = computed(() => POLICIES.map((p) => ({ ...p, st: p.status(), blocked: blockedCount(p, policyResults.value) })))
+const policyRows = computed(() => POLICIES.map((p) => ({ ...p, st: p.status() })))
 const unsetCount = computed(() => policyRows.value.filter((p) => !p.st.set).length)
 function setPolicyPath(path, v) {
   setPath(path, v || null)
@@ -43,6 +44,55 @@ let seq = 0
 const uid = (p) => `${p}${Date.now().toString(36)}${seq++}`
 
 watch(() => db.items, (v) => { if (!dirty.value) draft.value = clone(v) }, { deep: true })
+
+// ---- 평가 회차 (선택·복제·삭제) ----
+const responsesIn = (id) => Object.keys((id === db.period.id ? db.evaluations : db.periodData[id]?.evaluations) ?? {}).length
+async function changePeriod(id) {
+  if (id === db.period.id) return
+  if (dirty.value) {
+    const ok = await confirmDialog({ title: '저장하지 않은 변경', message: '평가 문항에 저장하지 않은 변경이 있습니다. 회차를 바꾸면 사라집니다.', okText: '버리고 이동', danger: true })
+    if (!ok) { periodSel.value = db.period.id; return }
+  }
+  switchPeriod(id)
+  toast(`'${db.period.name}' 회차로 바꿨습니다.`)
+}
+const periodSel = ref(db.period.id)
+// 회차가 바뀌면 문항·가중치 초안을 그 회차 값으로 다시 읽는다
+watch(() => db.period.id, (id) => {
+  periodSel.value = id
+  draft.value = clone(db.items)
+  weightDraft.value = clone(db.weights)
+})
+const cloneForm = ref(null) // { name, start, end, deadline }
+const cloneError = ref('')
+function openClone() {
+  cloneForm.value = { name: `${db.period.name} (복제)`, start: db.period.start, end: db.period.end, deadline: db.period.deadline }
+  cloneError.value = ''
+}
+function saveClone() {
+  const f = cloneForm.value
+  const name = f.name.trim()
+  if (!name) { cloneError.value = '회차 이름을 입력해 주세요.'; return }
+  if (periodList().some((p) => p.name === name)) { cloneError.value = `'${name}'은(는) 이미 있는 회차 이름입니다.`; return }
+  if (dirty.value) { cloneError.value = '평가 문항에 저장하지 않은 변경이 있습니다. 저장하거나 취소한 뒤 복제하세요.'; return }
+  const from = db.period.name
+  clonePeriod({ name, start: f.start, end: f.end, deadline: f.deadline })
+  cloneForm.value = null
+  toast(`'${from}'의 문항·가중치·KPI 지표 등 평가 정보를 복제해 '${name}' 회차를 만들었습니다. 응답·KPI 실적 등 평가 결과는 복제하지 않았습니다.`)
+}
+async function removePeriod() {
+  if (periodList().length < 2) return toast('회차가 하나뿐이라 삭제할 수 없습니다.', 'warning')
+  const p = db.period
+  const n = responsesIn(p.id)
+  const ok = await confirmDialog({
+    title: '회차 삭제',
+    message: `'${p.name}' 회차를 삭제합니다.\n이 회차의 문항·가중치와 응답 ${n}건, 확정 결과·보정·팀 KPI가 모두 지워지며 되돌릴 수 없습니다.\n직원·부서 정보는 지워지지 않습니다.`,
+    okText: '회차 삭제', danger: true,
+  })
+  if (!ok) return
+  deletePeriod(p.id)
+  toast(`'${p.name}' 회차를 삭제했습니다. 지금 회차: '${db.period.name}'`, 'warning')
+}
 
 function addItem(name = '새 평가 항목') {
   draft.value.push({ id: uid('i'), name, points: null, stages: ['self'], questions: [newQuestion()] })
@@ -143,6 +193,19 @@ async function saveItems() {
   }
   toast('평가 문항을 저장했습니다. 평가 화면과 결과 계산에 바로 반영됩니다.')
 }
+// 문항 CSV: 초안에 넣고, 저장은 기존 '저장' 버튼으로 (배점 100점 검사 포함)
+const qCsvOpen = ref(false)
+async function onQuestionImport({ mode, items }) {
+  const answered = draft.value.reduce((a, it) => a + it.questions.reduce((b, q) => b + responseCount(q.id), 0), 0)
+  if (mode === 'replace' && answered) {
+    const ok = await confirmDialog({ title: '기존 문항 바꾸기', message: `지금 문항에 응답이 ${answered}건 있습니다. 바꾸면 그 응답은 기록으로만 남고 평가 화면과 결과 계산에서 빠집니다.`, okText: '바꾸기', danger: true })
+    if (!ok) return
+  }
+  draft.value = mode === 'replace' ? items : [...draft.value, ...items]
+  qCsvOpen.value = false
+  const n = items.reduce((a, it) => a + it.questions.length, 0)
+  toast(`항목 ${items.length}개, 문항 ${n}개를 불러왔습니다. 확인한 뒤 '저장'을 누르세요.`)
+}
 function cancelItems() {
   draft.value = clone(db.items)
   toast('저장하지 않은 변경을 취소했습니다.', 'warning')
@@ -189,48 +252,14 @@ async function clearAssignments() {
   toast('임원 배정을 모두 해제했습니다.')
 }
 
-// 데이터 관계 검증
-const relationIssues = computed(() => {
-  const out = []
-  db.teams.forEach((t) => {
-    const leaders = leadersOf(t.id)
-    const members = membersOf(t.id)
-    if (members.length && !leaders.length) out.push(`${t.name}: 팀장이 없어 팀원 ${members.length}명의 팀장평가를 진행할 수 없습니다.`)
-    if (leaders.length > 1) out.push(`${t.name}: 팀장이 ${leaders.length}명입니다. 팀원은 팀장 모두에게 평가받습니다(다수 평가자 합산 방식 필요).`)
-    if (leaders.length && !members.length && db.settings.memberEvalEnabled) out.push(`${t.name}: 팀원이 없어 팀장의 팀원평가를 진행할 수 없습니다.`)
-  })
-  if (unassigned.value.length) out.push(`임원 미배정 대상 ${unassigned.value.length}명 (임원평가 필수)`)
-  Object.entries(db.execAssign).forEach(([tid, eid]) => {
-    const e = userById(eid)
-    if (!e || !e.active || e.role !== 'exec') out.push(`${userById(Number(tid))?.name ?? '알 수 없음'}: 배정된 임원이 비활성이거나 임원이 아닙니다.`)
-  })
-  return out
-})
-
-const relationRows = computed(() => sortUsers(db.users.filter(isEvalTarget)).map((u) => ({
-  user: u,
-  stages: STAGE_KEYS.map((s) => ({
-    stage: s,
-    on: stagesFor(u).includes(s),
-    evaluators: stagesFor(u).includes(s) ? evaluatorsFor(u, s) : [],
-  })),
-})))
-const relQuery = ref('')
-const relFiltered = computed(() => relationRows.value.filter((r) => !relQuery.value.trim() || r.user.name.includes(relQuery.value.trim()) || teamName(r.user.teamId).includes(relQuery.value.trim())))
-const evaluatorText = (s) => {
-  if (!s.on) return '해당 없음'
-  if (!s.evaluators.length) return '배정 필요'
-  if (s.stage === 'self') return '본인'
-  if (s.evaluators.length > 2) return `${s.evaluators[0].name} 외 ${s.evaluators.length - 1}명`
-  return s.evaluators.map((e) => e.name).join(', ')
-}
-
 // =========================================================
 // 3. 가중치와 계산 규칙
 // =========================================================
-const WEIGHT_ROLES = ['member', 'leader']
+const WEIGHT_ROLES = ['member', 'leader', 'exec']
 const weightDraft = ref(clone(db.weights))
-const activeStagesOf = (role) => ROLE_STAGES[role].filter((s) => s !== 'members' || db.settings.memberEvalEnabled)
+WEIGHT_ROLES.forEach((r) => { weightDraft.value[r] ??= Object.fromEntries(ROLE_STAGES[r].map((s) => [s, null])) })
+// 가중치를 넣는 단계: 지금 켜진 1·2·3차 단계 (팀원평가·임원 자기평가는 끌 수 있다)
+const activeStagesOf = (role) => ROLE_STAGES[role].filter((s) => !(s === 'members' && !db.settings.memberEvalEnabled) && !(role === 'exec' && s === 'self' && !db.settings.execSelfEnabled))
 const draftSum = (role) => activeStagesOf(role).reduce((a, s) => a + (typeof weightDraft.value[role][s] === 'number' ? weightDraft.value[role][s] : 0), 0)
 const draftErrors = (role) => {
   const w = weightDraft.value[role]
@@ -272,52 +301,54 @@ function setPolicy(key, v) {
 
     <ul class="nav nav-tabs mb-3">
       <li class="nav-item"><button class="nav-link" :class="{ active: tab === 'questions' }" @click="tab = 'questions'">평가 문항 및 항목 <span v-if="dirty" class="badge text-bg-warning ms-1">저장 안 됨</span></button></li>
-      <li class="nav-item"><button class="nav-link" :class="{ active: tab === 'stages' }" @click="tab = 'stages'">평가 단계 및 평가자 배정 <span v-if="relationIssues.length" class="badge text-bg-warning ms-1">{{ relationIssues.length }}</span></button></li>
+      <li class="nav-item"><button class="nav-link" :class="{ active: tab === 'stages' }" @click="tab = 'stages'">평가 단계 및 평가자 배정</button></li>
       <li class="nav-item"><button class="nav-link" :class="{ active: tab === 'weights' }" @click="tab = 'weights'">가중치 및 계산 규칙</button></li>
-      <li class="nav-item"><button class="nav-link" :class="{ active: tab === 'policies' }" @click="tab = 'policies'">정책 설정 현황 <span class="badge text-bg-warning ms-1">미설정 {{ unsetCount }}</span></button></li>
+      <li class="nav-item"><button class="nav-link" :class="{ active: tab === 'policies' }" @click="tab = 'policies'">정책 설정 <span v-if="unsetCount" class="badge text-bg-warning ms-1">{{ unsetCount }}</span></button></li>
     </ul>
 
-    <!-- 0. 정책 설정 현황 -->
+    <!-- 0. 정책 설정 -->
     <section v-if="tab === 'policies'" class="panel">
-      <h2 class="panel-title mb-1">정책 설정 현황</h2>
-      <p class="panel-sub">
-        계산에 필요한 업무 규칙과 현재 상태입니다. 선택지는 후보일 뿐이며 자동으로 고르지 않습니다.
-        미설정 정책이 있으면 그 정책이 필요한 계산 단계만 보류되고, 다른 단계의 값과 입력 화면은 그대로 쓸 수 있습니다.
-      </p>
+      <h2 class="panel-title mb-1">정책 설정</h2>
+      <p class="panel-sub">미설정인 정책이 필요한 점수만 계산하지 않습니다.</p>
       <div class="table-responsive">
         <table class="table table-clean align-middle" data-testid="policy-table">
-          <thead><tr><th>정책</th><th>현재 상태</th><th style="width: 260px">설정 (후보 선택)</th><th>필요한 계산 단계</th><th class="text-end">보류 중</th></tr></thead>
+          <thead><tr><th>정책</th><th style="width: 280px">설정</th><th>상태</th></tr></thead>
           <tbody>
             <tr v-for="p in policyRows" :key="p.key" :data-policy="p.key">
-              <td class="fw-semibold">{{ p.label }}<div v-if="p.note" class="small text-muted fw-normal">{{ p.note }}</div></td>
-              <td><span class="badge" :class="p.st.set ? 'text-bg-success' : 'text-bg-warning'">{{ p.st.set ? '설정됨' : '미설정' }}</span> <span class="small">{{ p.st.text }}</span></td>
+              <td class="fw-semibold">{{ p.label }}</td>
               <td>
                 <select v-if="p.control.type === 'select'" class="form-select form-select-sm" :value="getPath(p.control.path) ?? ''" :aria-label="p.label" @change="setPolicyPath(p.control.path, $event.target.value)">
                   <option value="">미설정</option>
                   <option v-for="o in POLICY_OPTIONS[p.control.group]" :key="o.key" :value="o.key">{{ o.label }}</option>
                 </select>
-                <button v-else-if="p.control.type === 'link'" class="btn btn-link btn-sm p-0" @click="goPolicy(p)">{{ p.control.label }}에서 설정 →</button>
-                <span v-else class="small text-muted">후보 없음 · 정책 확정 후 추가</span>
+                <button v-else class="btn btn-link btn-sm p-0" @click="goPolicy(p)">{{ p.control.label }}에서 설정 →</button>
               </td>
-              <td class="small">{{ p.steps }}</td>
-              <td class="text-end">
-                <span v-if="p.blocked === null" class="text-muted small">-</span>
-                <span v-else-if="p.blocked" class="badge text-bg-warning">{{ p.blocked }}명 보류</span>
-                <span v-else class="small text-success">없음</span>
-              </td>
+              <td><span class="badge" :class="p.st.set ? 'text-bg-success' : 'text-bg-warning'">{{ p.st.set ? '설정됨' : '미설정' }}</span> <span v-if="p.st.text !== '미설정'" class="small text-muted">{{ p.st.text }}</span></td>
             </tr>
           </tbody>
         </table>
       </div>
-      <p class="panel-sub mb-0">'보류 중'은 지금 이 정책이 비어 있어 계산이 멈춘 직원 수입니다. 평가가 끝나지 않아 아직 그 단계에 이르지 않은 직원은 세지 않습니다.</p>
     </section>
 
     <!-- 1. 문항 -->
+    <section v-if="tab === 'questions'" class="panel period-bar mb-3" data-testid="period-bar">
+      <label for="period-select" class="fw-semibold mb-0">평가 회차</label>
+      <select id="period-select" v-model="periodSel" class="form-select form-select-sm w-auto" @change="changePeriod(periodSel)">
+        <option v-for="p in periodList()" :key="p.id" :value="p.id">{{ p.name }}</option>
+      </select>
+      <span class="small text-muted">{{ db.period.start }} ~ {{ db.period.end }} · 응답 {{ responsesIn(db.period.id) }}건</span>
+      <div class="ms-auto d-flex gap-2">
+        <button class="btn btn-outline-primary btn-sm" @click="openClone">회차 복제</button>
+        <button class="btn btn-outline-danger btn-sm" :disabled="periodList().length < 2" :title="periodList().length < 2 ? '회차가 하나뿐이라 삭제할 수 없습니다' : ''" @click="removePeriod">회차 삭제</button>
+      </div>
+      <div class="w-100 small text-muted">선택한 회차가 진행현황·평가 결과·직원의 내 평가 등 모든 화면에 적용됩니다. 문항·가중치·계산 규칙과 평가 결과는 회차마다 따로 저장됩니다.</div>
+    </section>
     <section v-if="tab === 'questions'" class="panel">
       <div class="save-bar" :class="{ dirty }">
         <span v-if="dirty"><strong>저장하지 않은 변경이 있습니다.</strong> 저장해야 평가 화면과 결과 계산에 반영됩니다.</span>
         <span v-else class="text-muted">모든 변경이 저장되었습니다. 점선 밑줄이 있는 글자를 누르면 바로 고칠 수 있습니다.</span>
         <div class="ms-auto d-flex gap-2">
+          <button class="btn btn-csv btn-sm" @click="qCsvOpen = true">문항 CSV 불러오기</button>
           <button class="btn btn-light btn-sm" :disabled="!dirty" @click="cancelItems">변경 취소</button>
           <button class="btn btn-primary btn-sm" :disabled="!dirty || !pointsState.ok" :title="pointsState.ok ? '' : '배점 합계를 100점으로 맞춰야 저장할 수 있습니다'" @click="saveItems">저장</button>
         </div>
@@ -436,7 +467,10 @@ function setPolicy(key, v) {
           </tbody>
         </table>
       </div>
-      <button class="btn btn-outline-primary btn-sm" @click="addItem()">+ 평가 항목 추가</button>
+      <div class="d-flex gap-2">
+        <button class="btn btn-outline-primary btn-sm" @click="addItem()">+ 평가 항목 추가</button>
+        <button class="btn btn-csv btn-sm" @click="qCsvOpen = true">문항 CSV 불러오기</button>
+      </div>
       <p class="panel-sub mt-3 mb-0">
         배점은 평가 항목 단위로 매깁니다. 배점이 없거나 객관식 문항이 없는 항목은 점수 계산에서 빠집니다.
         항목 안 여러 문항을 항목 점수로 바꾸는 방법은 '가중치 및 계산 규칙' 탭에서 정합니다.
@@ -472,7 +506,7 @@ function setPolicy(key, v) {
                     <span class="small">{{ db.settings.execSelfEnabled ? '사용' : '사용 안 함' }}</span>
                   </label>
                 </td>
-                <td class="text-muted">해당 없음</td><td class="text-muted">해당 없음</td>
+                <td>상향평가 (담당 임원으로 배정된 팀장들)</td><td class="text-muted">해당 없음</td>
               </tr>
             </tbody>
           </table>
@@ -515,36 +549,16 @@ function setPolicy(key, v) {
         </div>
       </section>
 
-      <section class="panel">
-        <div class="panel-head">
-          <h2 class="panel-title">평가자 관계 확인</h2>
-          <input v-model="relQuery" class="form-control form-control-sm" style="width: 200px" placeholder="이름·부서 검색" aria-label="평가자 관계 검색" />
-        </div>
-        <div v-if="relationIssues.length" class="alert alert-warning small py-2">
-          <div v-for="m in relationIssues" :key="m">{{ m }}</div>
-        </div>
-        <div v-else class="alert alert-success small py-2">평가 대상자와 평가자 연결에 문제가 없습니다.</div>
-        <div class="table-responsive rel-table">
-          <table class="table table-clean table-sm">
-            <thead><tr><th>평가 대상자</th><th>부서</th><th>역할</th><th v-for="(s, key) in STAGES" :key="key">{{ s.label }}</th></tr></thead>
-            <tbody>
-              <tr v-for="r in relFiltered" :key="r.user.id">
-                <td class="fw-semibold">{{ r.user.name }}</td><td>{{ teamName(r.user.teamId) }}</td><td>{{ roleLabel(r.user.role) }}</td>
-                <td v-for="s in r.stages" :key="s.stage" :class="{ 'text-muted': !s.on, 'text-danger fw-semibold': s.on && !s.evaluators.length }">{{ evaluatorText(s) }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
+      
     </template>
 
     <!-- 3. 가중치 -->
     <template v-if="tab === 'weights'">
       <section class="panel mb-3">
         <h2 class="panel-title mb-1">평가 단계별 가중치</h2>
-        <p class="panel-sub">단계별 점수(100점 기준)에 곱해 개인평가 점수를 만듭니다. 사원은 2차 작업 지시에 따라 본인 20% · 팀장 40% · 본부장(임원) 40%를 기준값으로 넣었습니다. 팀장은 2차가 팀원평가라 확정 전까지 미설정입니다.</p>
+        <p class="panel-sub">1·2·3차 단계 점수(100점 기준)에 곱해 개인평가 점수를 만듭니다. 처음 값은 사원 본인 20 · 팀장 40 · 임원 40, 팀장 본인 20 · 팀원(상향) 40 · 임원 40, 임원 본인 20 · 상향 80입니다.</p>
         <div class="row g-3">
-          <div v-for="role in WEIGHT_ROLES" :key="role" class="col-lg-6">
+          <div v-for="role in WEIGHT_ROLES" :key="role" class="col-lg-4">
             <div class="weight-card" :data-role="role">
               <div class="d-flex justify-content-between align-items-center mb-2">
                 <strong>{{ roleLabel(role) }} 평가</strong>
@@ -572,7 +586,7 @@ function setPolicy(key, v) {
             </div>
           </div>
         </div>
-        <p class="panel-sub mt-3 mb-0">임원은 자기평가만 진행하며 가중치·등급 산출 대상이 아닙니다.</p>
+        <p class="panel-sub mt-3 mb-0">꺼진 단계는 계산에서 빠지며, 켜진 단계의 합계가 100%가 되어야 합니다.</p>
       </section>
 
       <section class="panel">
@@ -594,18 +608,36 @@ function setPolicy(key, v) {
           </select>
           <span class="small text-muted">{{ POLICY_OPTIONS.multiEvaluatorRule.find((o) => o.key === db.settings.multiEvaluatorRule)?.desc ?? '' }}</span>
         </div>
-        <p class="panel-sub mt-2 mb-0">단계 점수는 (단계 원점수 ÷ 단계 배점 합계) × 100으로 100점 기준 점수를 만든 뒤 가중치를 곱합니다. 백분위·KPI·등급 규칙은 '평가 결과'와 '부서 KPI 관리'에서 정합니다.</p>
+        <p class="panel-sub mt-2 mb-0">단계 점수는 (단계 원점수 ÷ 단계 배점 합계) × 100으로 100점 기준 점수를 만든 뒤 가중치를 곱합니다. 부서 KPI 반영 비율은 '부서 KPI 관리', 등급 규칙은 '평가 결과'에서 정합니다.</p>
       </section>
     </template>
 
     <QuestionSettings v-if="settingsQuestion" :question="settingsQuestion" @close="settingsQuestion = null" />
+    <QuestionCsvImport v-if="qCsvOpen" @close="qCsvOpen = false" @import="onQuestionImport" />
 
+    <AppModal v-if="cloneForm" title="회차 복제" @close="cloneForm = null">
+      <p class="small">'{{ db.period.name }}'의 <strong>평가 문항·항목, 단계별 가중치, 직급별 비율, 계산 규칙, 평가 대상 명단, 팀 KPI 지표·목표</strong>를 복제합니다.
+        팀 KPI는 지표와 목표만 복제하고 실적은 비워 둡니다. 응답·최종 확정·보정·직접 수정·면담 기록 같은 평가 결과는 복제하지 않습니다.</p>
+      <label class="form-label" for="pc-name">새 회차 이름 <span class="text-danger">*</span></label>
+      <input id="pc-name" v-model="cloneForm.name" class="form-control mb-2" />
+      <div class="row g-2">
+        <div class="col-4"><label class="form-label small" for="pc-start">시작일</label><input id="pc-start" v-model="cloneForm.start" type="date" class="form-control form-control-sm" /></div>
+        <div class="col-4"><label class="form-label small" for="pc-end">종료일</label><input id="pc-end" v-model="cloneForm.end" type="date" class="form-control form-control-sm" /></div>
+        <div class="col-4"><label class="form-label small" for="pc-deadline">마감일</label><input id="pc-deadline" v-model="cloneForm.deadline" type="date" class="form-control form-control-sm" /></div>
+      </div>
+      <div v-if="cloneError" class="text-danger small mt-2" role="alert">{{ cloneError }}</div>
+      <template #footer>
+        <button class="btn btn-light" @click="cloneForm = null">취소</button>
+        <button class="btn btn-primary" @click="saveClone">복제</button>
+      </template>
+    </AppModal>
     <ExecAssignModal v-if="selectedExec" :exec-id="selectedExec" @close="selectedExec = null" />
   </div>
 </template>
 
 <style scoped>
 .save-bar { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 8px; background: #f4f7fc; border: 1px solid #d6e3f5; margin-bottom: 12px; font-size: 0.9rem; flex-wrap: wrap; }
+.period-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .save-bar.dirty { background: #fff8e6; border-color: #f0d48a; }
 .points-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 12px; border-radius: 8px; border: 1px solid #cfe3d6; background: #f3faf5; margin-bottom: 12px; font-size: 0.88rem; }
 .points-bar.bad { border-color: #f1c0c0; background: #fdf4f4; }

@@ -4,7 +4,8 @@ import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
 import {
   db, currentUser, userById, teamName, getEvaluation, saveEvaluation, validateAnswers, canEvaluate, toast, confirmDialog,
 } from '../store'
-import { stageLabel, roleLabel, STAGES, localDate } from '../constants'
+import { localDate } from '../constants'
+import { t, dt, stageName, evaluatorName, roleName } from '../i18n'
 import AnswerSheet from '../components/AnswerSheet.vue'
 
 // 배정된 평가 하나를 작성한다. 라우터에서 권한을 확인하지만 화면에서도 다시 확인한다.
@@ -28,79 +29,79 @@ function saveDraft() {
     saveEvaluation(stage, target, me, answers.value, false)
     saved.value = JSON.stringify(answers.value)
     problems.value = []
-    toast('임시 저장했습니다. 제출 전까지 계속 고칠 수 있습니다.')
+    toast(t('ev.draftSaved'))
   } catch (e) {
-    toast(`저장하지 못했습니다: ${e.message}`, 'warning')
+    toast(t('ev.saveFail', { msg: e.message }), 'warning')
   }
 }
 
 async function submit() {
   problems.value = validateAnswers(stage, answers.value)
   if (problems.value.length) {
-    toast(`미응답 또는 확인이 필요한 문항이 ${problems.value.length}개 있습니다.`, 'warning')
+    toast(t('ev.problems', { n: problems.value.length }), 'warning')
     return
   }
-  const ok = await confirmDialog({ title: '평가 제출', message: '제출하면 더 이상 고칠 수 없습니다. 제출하시겠습니까?\n(수정이 필요하면 관리자에게 재작성 허용을 요청해야 합니다)', okText: '제출' })
+  const ok = await confirmDialog({ title: t('ev.confirmTitle'), message: t('ev.confirmMsg'), okText: t('ev.submit') })
   if (!ok) return
   try {
     saveEvaluation(stage, target, me, answers.value, true)
     saved.value = JSON.stringify(answers.value)
-    toast('평가를 제출했습니다.')
+    toast(t('ev.sent'))
     router.push('/me')
   } catch (e) {
-    toast(`제출하지 못했습니다: ${e.message}`, 'warning')
+    toast(t('ev.submitFail', { msg: e.message }), 'warning')
   }
 }
 
 onBeforeRouteLeave(async () => {
   if (!dirty.value) return true
-  return confirmDialog({ title: '저장하지 않은 내용', message: '저장하지 않은 응답이 있습니다. 나가면 사라집니다.', okText: '나가기', danger: true })
+  return confirmDialog({ title: t('ev.leaveTitle'), message: t('ev.leaveMsg'), okText: t('ev.leave'), danger: true })
 })
 </script>
 
 <template>
   <div v-if="!allowed" class="panel empty-hint">
-    나에게 배정되지 않은 평가입니다. <RouterLink to="/me">내 평가로 돌아가기</RouterLink>
+    {{ t('ev.notAssigned') }} <RouterLink to="/me">{{ t('ev.back') }}</RouterLink>
   </div>
   <div v-else>
     <div class="page-header">
       <div>
-        <RouterLink to="/me" class="small">← 내 평가</RouterLink>
-        <h1 class="page-title mt-1">{{ isSelf ? '자기평가' : `${target.name}님 ${stageLabel(stage)}` }}</h1>
+        <RouterLink to="/me" class="small">← {{ t('nav.myEval') }}</RouterLink>
+        <h1 class="page-title mt-1">{{ isSelf ? stageName('self') : t('ev.titleOther', { name: target.name, stage: stageName(stage) }) }}</h1>
       </div>
-      <span class="stage-badge" :class="submitted ? 'stage-done' : 'stage-self'">{{ submitted ? '제출 완료' : getEvaluation(stage, target.id, me.id) ? '작성 중' : '시작 전' }}</span>
+      <span class="stage-badge" :class="submitted ? 'stage-done' : 'stage-self'">{{ submitted ? t('ev.submitted') : getEvaluation(stage, target.id, me.id) ? t('ev.writing') : t('status.todo') }}</span>
     </div>
 
     <div class="row g-3">
       <div class="col-lg-4 order-lg-2">
         <div class="panel info">
-          <h2 class="panel-title mb-2">평가 대상자</h2>
+          <h2 class="panel-title mb-2">{{ t('ev.target') }}</h2>
           <dl class="row mb-0 small">
-            <dt class="col-4">이름</dt><dd class="col-8">{{ target.name }}</dd>
-            <dt class="col-4">소속</dt><dd class="col-8">{{ teamName(target.teamId) }}</dd>
-            <dt class="col-4">직급</dt><dd class="col-8">{{ target.position }}</dd>
-            <dt class="col-4">역할</dt><dd class="col-8">{{ roleLabel(target.role) }}</dd>
-            <dt class="col-4">평가 단계</dt><dd class="col-8">{{ stageLabel(stage) }} ({{ STAGES[stage].evaluator }})</dd>
-            <dt class="col-4">평가 기간</dt><dd class="col-8">{{ db.period.start }} ~ {{ db.period.end }}</dd>
-            <dt class="col-4">마감일</dt><dd class="col-8">{{ db.period.deadline }}</dd>
+            <dt class="col-4">{{ t('col.name') }}</dt><dd class="col-8">{{ target.name }}</dd>
+            <dt class="col-4">{{ t('col.team') }}</dt><dd class="col-8">{{ dt(teamName(target.teamId)) }}</dd>
+            <dt class="col-4">{{ t('col.position') }}</dt><dd class="col-8">{{ dt(target.position) }}</dd>
+            <dt class="col-4">{{ t('col.role') }}</dt><dd class="col-8">{{ roleName(target.role) }}</dd>
+            <dt class="col-4">{{ t('me.colStage') }}</dt><dd class="col-8">{{ stageName(stage) }} ({{ evaluatorName(stage) }})</dd>
+            <dt class="col-4">{{ t('ev.period') }}</dt><dd class="col-8">{{ db.period.start }} ~ {{ db.period.end }}</dd>
+            <dt class="col-4">{{ t('ev.deadline') }}</dt><dd class="col-8">{{ db.period.deadline }}</dd>
           </dl>
-          <p v-if="stage === 'members'" class="small text-muted mt-2 mb-0">팀원평가는 팀장의 업무 수행을 평가합니다. 평가자 이름은 팀장에게 공개되지 않습니다.</p>
+          <p v-if="stage === 'members'" class="small text-muted mt-2 mb-0">{{ t('ev.membersNote') }}</p>
         </div>
       </div>
 
       <div class="col-lg-8 order-lg-1">
         <div class="panel">
           <div v-if="submitted" class="alert alert-success small py-2">
-            {{ localDate(getEvaluation(stage, target.id, me.id).submittedAt) }}에 제출했습니다. 제출한 평가는 고칠 수 없습니다.
+            {{ t('ev.submittedAt', { date: localDate(getEvaluation(stage, target.id, me.id).submittedAt) }) }}
           </div>
           <div v-if="problems.length" class="alert alert-danger small py-2" role="alert">
             <div v-for="p in problems" :key="p.questionId">{{ p.message }}</div>
           </div>
           <AnswerSheet :stage="stage" :answers="answers" :readonly="submitted" :problem-ids="problems.map((p) => p.questionId)" />
           <div v-if="!submitted" class="actions">
-            <span class="small" :class="dirty ? 'text-warning-emphasis' : 'text-muted'">{{ dirty ? '저장하지 않은 변경이 있습니다.' : '저장된 상태입니다.' }}</span>
-            <button class="btn btn-light border" @click="saveDraft">임시 저장</button>
-            <button class="btn btn-primary" @click="submit">제출</button>
+            <span class="small" :class="dirty ? 'text-warning-emphasis' : 'text-muted'">{{ dirty ? t('ev.dirty') : t('ev.clean') }}</span>
+            <button class="btn btn-light border" @click="saveDraft">{{ t('ev.draft') }}</button>
+            <button class="btn btn-primary" @click="submit">{{ t('ev.submit') }}</button>
           </div>
         </div>
       </div>

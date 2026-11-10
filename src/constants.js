@@ -6,6 +6,7 @@ export const STAGES = {
   leader: { label: '팀장평가', evaluator: '소속 팀장' },
   members: { label: '팀원평가', evaluator: '소속 팀원' },
   exec: { label: '임원평가', evaluator: '배정된 임원' },
+  upward: { label: '상향평가', evaluator: '담당 임원이 배정된 팀장' },
 }
 export const STAGE_KEYS = Object.keys(STAGES)
 export const stageLabel = (key) => STAGES[key]?.label ?? key
@@ -22,7 +23,7 @@ export const roleLabel = (role) => ROLES[role] ?? role
 export const ROLE_STAGES = {
   member: ['self', 'leader', 'exec'],
   leader: ['self', 'members', 'exec'],
-  exec: ['self'],
+  exec: ['self', 'upward'],
 }
 
 // 직급. CSV와 직원 수정 화면에서 쓴다. 직급에서 역할을 추천하지만 관리자가 바꿀 수 있다.
@@ -53,35 +54,6 @@ export const POLICY_OPTIONS = {
   multiEvaluatorRule: [
     { key: 'average', label: '평가자 점수 평균', desc: '한 단계에 평가자가 여럿이면(예: 팀원평가) 평가자별 점수를 평균 냅니다.' },
   ],
-  percentileMethod: [
-    { key: 'pr', label: '백분위 순위(PR)', desc: '(나보다 낮은 인원 + 동점 인원 × 0.5) ÷ 비교 집단 인원 × 100' },
-    { key: 'rank', label: '순위 백분율', desc: '(비교 집단 인원 − 순위) ÷ (비교 집단 인원 − 1) × 100. 1등이 100입니다.' },
-  ],
-  percentileTies: [
-    { key: 'midpoint', label: '동점자는 중간 순위', desc: '동점자들이 차지하는 순위의 가운데 값을 씁니다. (PR: 낮은 인원 + 동점 인원 × 0.5)' },
-    { key: 'upper', label: '동점자는 모두 높은 순위', desc: '동점자 모두 그중 가장 높은 순위를 받습니다.' },
-  ],
-  percentileExclusion: [
-    { key: 'completeOnly', label: '3단계 평가 완료자만 비교', desc: '평가가 끝나지 않은 사람, 비활성·평가 대상 아님인 사람은 비교 집단에서 빼고 백분위도 계산하지 않습니다.' },
-  ],
-  correctionRule: [
-    { key: 'sum', label: '부서 보정 + 개인 보정 함께 적용', desc: 'KPI 반영 후 점수 + 부서별 보정값 + 개인별 보정값 (값이 없는 쪽은 적용하지 않음)' },
-    { key: 'personFirst', label: '개인 보정 우선', desc: '개인별 보정값이 있으면 그 값만, 없으면 부서별 보정값을 KPI 반영 후 점수에 더합니다.' },
-  ],
-  percentileGroup: [
-    { key: 'all', label: '전체 평가 대상자' },
-    { key: 'team', label: '같은 부서' },
-    { key: 'role', label: '같은 역할(사원/팀장)' },
-  ],
-  kpiMethod: [
-    { key: 'none', label: 'KPI 반영 안 함', desc: '기준 점수를 그대로 씁니다.' },
-    { key: 'multiply', label: '곱하기', desc: '기준 점수 × (부서 KPI ÷ 100)' },
-    { key: 'mix', label: '비율 혼합', desc: '기준 점수 × (1 − 반영 비율) + 부서 KPI × 반영 비율' },
-  ],
-  kpiBase: [
-    { key: 'weighted', label: '가중치 적용 점수' },
-    { key: 'percentile', label: '백분위 환산 점수' },
-  ],
   gradeRounding: [
     { key: 'round', label: '반올림' },
     { key: 'floor', label: '내림' },
@@ -108,3 +80,29 @@ export function localDateTime(iso) {
   const d = new Date(iso)
   return `${localDate(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
+
+// 직급별 최종 반영 요소 (팀 KPI 관리 › 직급별 비율)
+export const RATIO_ELEMENTS = {
+  personal: { label: '개인평가', desc: '1·2·3차 평가 단계 점수를 단계 가중치로 합친 점수' },
+  kpi: { label: '팀 KPI', desc: '소속 팀의 KPI 점수' },
+}
+// 직급별로 쓸 수 있는 요소: 개인평가에 부서(팀) KPI 실적을 반영한다
+export const ROLE_RATIO_ELEMENTS = {
+  member: ['personal', 'kpi'],
+  leader: ['personal', 'kpi'],
+  exec: ['personal', 'kpi'],
+}
+// 처음 값: 사용자가 보내준 화면 예시에서 상향평가 몫을 개인평가로 합친 값
+// (팀장 개인 20 + 상향 40 → 60, 임원 상향 40 → 개인평가 40)
+export const DEFAULT_ROLE_RATIOS = {
+  member: { personal: { on: true, value: 80 }, kpi: { on: true, value: 20 } },
+  leader: { personal: { on: true, value: 60 }, kpi: { on: true, value: 40 } },
+  exec: { personal: { on: true, value: 40 }, kpi: { on: true, value: 60 } },
+}
+// 이전 기본값 (직급별 비율에 상향평가가 따로 있던 때). 이 값 그대로면 새 기본값으로 바꾼다
+export const OLD_DEFAULT_ROLE_RATIOS = {
+  leader: { personal: { on: true, value: 20 }, kpi: { on: true, value: 40 }, upward: { on: true, value: 40 } },
+  exec: { kpi: { on: true, value: 60 }, upward: { on: true, value: 40 } },
+}
+// 질문 CSV의 적용 단계 이름
+export const STAGE_BY_LABEL = Object.fromEntries(Object.entries(STAGES).map(([k, v]) => [v.label, k]))

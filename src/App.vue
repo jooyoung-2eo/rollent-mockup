@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { store } from './store'
+import { t } from './i18n'
 import AppSidebar from './components/AppSidebar.vue'
 import AppModal from './components/AppModal.vue'
 import PrintArea from './components/PrintArea.vue'
@@ -27,7 +28,7 @@ function closeConfirm(result) {
   <AppModal v-if="store.confirmState" :title="store.confirmState.title" size="sm" @close="closeConfirm(false)">
     <p class="mb-0" style="white-space: pre-line">{{ store.confirmState.message }}</p>
     <template #footer>
-      <button class="btn btn-light" @click="closeConfirm(false)">취소</button>
+      <button class="btn btn-light" @click="closeConfirm(false)">{{ t('common.cancel') }}</button>
       <button class="btn" :class="store.confirmState.danger ? 'btn-danger' : 'btn-primary'" @click="closeConfirm(true)">
         {{ store.confirmState.okText }}
       </button>

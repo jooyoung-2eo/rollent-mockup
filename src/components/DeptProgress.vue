@@ -29,7 +29,7 @@ const rows = computed(() => db.teams.map((t) => {
     todo: people.todo.length,
     stages: [
       { label: '자기', ...stageCount((u) => (stagesFor(u).includes('self') ? 'self' : null)) },
-      { label: '2차', ...stageCount((u) => stagesFor(u).find((s) => s === 'leader' || s === 'members') ?? null) },
+      { label: '2차', ...stageCount((u) => stagesFor(u).find((s) => s === 'leader' || s === 'members' || s === 'upward') ?? null) },
       { label: '3차', ...stageCount((u) => (stagesFor(u).includes('exec') ? 'exec' : null)) },
     ].filter((s) => s.total > 0),
   }

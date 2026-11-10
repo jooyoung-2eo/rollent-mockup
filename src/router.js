@@ -1,5 +1,6 @@
 import { createRouter, createWebHashHistory, createMemoryHistory } from 'vue-router'
 import { store, currentUser, canEvaluate, logout, toast } from './store'
+import { t } from './i18n'
 import LoginView from './views/LoginView.vue'
 import ProgressView from './views/ProgressView.vue'
 import OrgView from './views/OrgView.vue'
@@ -31,21 +32,21 @@ const router = createRouter({
 
 export const homeOf = (kind) => (kind === 'admin' ? '/progress' : '/me')
 
-// 화면 접근 권한 확인. 프런트엔드 목업 수준의 통제이며 실제 서비스에서는 서버 검증이 필요하다.
+// 화면 접근 권한 확인. 프런트엔드에서 하는 통제이며 실제 서비스에서는 서버 검증이 필요하다.
 router.beforeEach((to) => {
   const s = store.session
   if (s && !currentUser()) logout() // 삭제·비활성화된 계정
   if (!store.session) return to.name === 'login' ? true : { name: 'login' }
   if (to.name === 'login') return homeOf(store.session.kind)
   if (to.meta.role === 'admin' && store.session.kind !== 'admin') {
-    toast('관리자만 사용할 수 있는 화면입니다.', 'warning')
+    toast(t('nav.adminOnly'), 'warning')
     return '/me'
   }
   if (to.meta.role === 'user' && store.session.kind !== 'user') return '/progress'
   if (to.name === 'evaluate') {
     const u = currentUser()
     if (!u.active || !canEvaluate(u.id, to.params.stage, Number(to.params.targetId))) {
-      toast('나에게 배정되지 않은 평가입니다.', 'warning')
+      toast(t('ev.notAssigned'), 'warning')
       return '/me'
     }
   }

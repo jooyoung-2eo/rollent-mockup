@@ -1,13 +1,14 @@
 import { DEFAULT_CHOICE_LABELS, EXAMPLE_CHOICE_SCORES, roleFromPosition } from './constants'
 
 // 테스트용 가상 데이터. 실제 직원 정보가 아니다.
-// public/samples/employees-34.csv 와 같은 34명이다.
+// public/samples/employees-32.csv 와 같은 32명이다.
 
 const PROD_MEMBERS = ['김민준', '이서준', '박도윤', '최예준', '정시우', '강하준', '조주원', '윤지호', '장지후', '임준서', '한건우', '오현우', '서우진', '신선우']
 // 관리팀 첫 사람은 생산팀 첫 사람과 동명이인이다(이름+사번 로그인 확인용)
 const ADMIN_MEMBERS = ['김민준', '이지민', '박서연', '최서윤', '정지우', '강하윤', '조하은', '윤민서', '장수아', '임지유', '한윤서', '오채원', '서지아', '신다은']
 const MEMBER_POSITIONS = ['사원', '사원', '주임', '대리', '사원', '과장', '대리', '사원', '주임', '차장', '사원', '대리', '사원', '과장']
-const EXECS = [['장민석', '전무'], ['강태호', '상무'], ['송하은', '상무'], ['윤지영', '이사']]
+// 임원 2명: 팀장이 2명이라 임원마다 상향평가할 팀장이 한 명씩 있도록 맞춘다
+const EXECS = [['강태호', '상무', '2008002'], ['윤지영', '이사', '2008004']]
 
 export const SEED_PERIOD = { name: '2026년 하반기 정기평가', start: '2026-10-01', end: '2026-11-30', deadline: '2026-11-20' }
 
@@ -39,10 +40,45 @@ export function seedItems() {
       choiceQuestion('q7', '팀원에게 업무 방향을 명확하게 제시한다.'),
       choiceQuestion('q8', '팀원의 의견을 경청하고 성장을 지원한다.'),
     ] },
-    { id: 'i5', name: '종합 의견', points: null, stages: ['leader', 'members', 'exec'], questions: [
+    { id: 'i6', name: '경영 리더십', points: 100, stages: ['upward'], questions: [
+      choiceQuestion('q10', '조직의 방향과 목표를 분명하게 제시한다.'),
+      choiceQuestion('q11', '팀장의 의견을 듣고 필요한 지원을 한다.'),
+    ] },
+    { id: 'i5', name: '종합 의견', points: null, stages: ['leader', 'members', 'exec', 'upward'], questions: [
       textQuestion('q9', '강점과 보완할 점을 자유롭게 적어 주세요.', 'long'),
     ] },
   ]
+}
+
+// 팀 KPI 예시 (가상 값). 부서명으로 연결한다. 관리팀 지표 일부는 사용자가 보내준 화면 예시를 참고했다.
+const SEED_TEAM_KPI = {
+  생산팀: [
+    ['생산 계획 달성률', '생산 직무', 100, 96, '%', 'higher', 40],
+    ['불량률', '품질 직무', 2, 2.4, '%', 'lower', 30],
+    ['납기 준수율', '전체 직무', 98, 99, '%', 'higher', 30],
+  ],
+  관리팀: [
+    ['과제 달성률', '전체 직무', 85, 80, '%', 'higher', 40],
+    ['내부 고객 만족도', '전체 직무', 4.5, 4.7, '점', 'higher', 30],
+    ['월 결산 마감 소요일', '회계 직무', 5, 6, '일', 'lower', 30],
+  ],
+  경영진: [
+    ['매출 목표 달성률', '전사', 100, 92, '%', 'higher', 50],
+    ['영업이익률', '전사', 10, 9, '%', 'higher', 30],
+    ['신규 수주', '전사', 20, 22, '건', 'higher', 20],
+  ],
+}
+export function seedTeamKpi(teams) {
+  const out = {}
+  teams.forEach((t) => {
+    const list = SEED_TEAM_KPI[t.name]
+    if (!list) return
+    out[t.id] = {
+      mode: 'indicators', direct: null,
+      indicators: list.map(([name, scope, target, actual, unit, direction, weight], i) => ({ id: `seed-${t.id}-${i + 1}`, name, scope, target, actual, unit, direction, weight })),
+    }
+  })
+  return out
 }
 
 export function seedEmployees() {
@@ -58,7 +94,7 @@ export function seedEmployees() {
   PROD_MEMBERS.forEach((n, i) => add(n, String(2019101 + i), 1, MEMBER_POSITIONS[i]))
   add('이수진', '2015002', 2, '팀장')
   ADMIN_MEMBERS.forEach((n, i) => add(n, String(2020201 + i), 2, MEMBER_POSITIONS[(i + 3) % 14]))
-  EXECS.forEach(([n, p], i) => add(n, String(2008001 + i), 3, p))
+  EXECS.forEach(([n, p, empNo]) => add(n, empNo, 3, p))
   return { teams, users }
 }
 
@@ -114,7 +150,7 @@ export function seedEvaluations(users, items, execAssign) {
     })
     if (teamId === 1 && execOf(leader)) put('exec', leader, execOf(leader), 'submitted', 3)
   })
-  users.filter((u) => u.role === 'exec').slice(0, 2).forEach((e) => put('self', e, e, 'submitted', 2))
+  users.filter((u) => u.role === 'exec').slice(0, 1).forEach((e) => put('self', e, e, 'submitted', 2))
   return evals
 }
 
@@ -122,11 +158,10 @@ export function seedEvaluations(users, items, execAssign) {
 export function seedExecAssign(users) {
   const execs = users.filter((u) => u.role === 'exec')
   const assign = {}
+  // 강태호 → 생산팀 전체, 윤지영 → 관리팀 전체 (팀장 포함)
   const groups = [
-    users.filter((u) => u.teamId === 1 && u.role === 'member').slice(0, 7),
-    [...users.filter((u) => u.teamId === 1 && u.role === 'member').slice(7), ...users.filter((u) => u.teamId === 1 && u.role === 'leader')],
-    users.filter((u) => u.teamId === 2 && u.role === 'member').slice(0, 7),
-    [...users.filter((u) => u.teamId === 2 && u.role === 'member').slice(7), ...users.filter((u) => u.teamId === 2 && u.role === 'leader')],
+    users.filter((u) => u.teamId === 1 && u.role !== 'exec'),
+    users.filter((u) => u.teamId === 2 && u.role !== 'exec'),
   ]
   groups.forEach((g, i) => g.forEach((t) => { assign[t.id] = execs[i].id }))
   return assign

@@ -81,18 +81,16 @@ const adjText = (a) => (!a ? '조정 없음' : a.type === 'reset' ? '조정 해�
         </tbody>
       </table>
 
-      <h2>4. 백분위 · KPI · 보정 · 직접 수정</h2>
+      <h2>4. 부서 KPI · 개인별 보정 · 직접 수정</h2>
       <table class="grid">
         <thead><tr><th>단계</th><th class="r">값</th><th>적용 기준</th></tr></thead>
         <tbody>
-          <tr><td>백분위</td><td class="r">{{ n(v.percentile) }}</td><td>{{ v.percentileRule }}</td></tr>
-          <tr><td>부서 KPI 적용 전 점수</td><td class="r">{{ n(v.kpiBefore) }}</td><td rowspan="3">{{ v.kpiRule }}</td></tr>
-          <tr><td>부서 KPI 점수</td><td class="r">{{ v.kpiScore ?? '반영 안 함' }}</td></tr>
-          <tr><td>부서 KPI 적용 후 점수</td><td class="r">{{ n(v.kpiAfter) }}</td></tr>
+          <tr><td>개인평가 점수</td><td class="r">{{ n(v.kpiBefore) }}</td><td rowspan="3">직급별 비율: {{ v.kpiRule }}</td></tr>
+          <tr><td>팀 KPI 점수</td><td class="r">{{ v.kpiScore ?? '-' }}</td></tr>
+          <tr><td>부서 KPI 반영 점수</td><td class="r">{{ n(v.kpiAfter) }}</td></tr>
           <template v-if="'corrected' in v">
-            <tr><td>부서별 보정값</td><td class="r">{{ signed(v.deptCorrection?.value) }}</td><td>{{ v.deptCorrection?.reason || '-' }}</td></tr>
             <tr><td>개인별 보정값</td><td class="r">{{ signed(v.personCorrection?.value) }}</td><td>{{ v.personCorrection?.reason ? `사유: ${v.personCorrection.reason}` : '-' }}</td></tr>
-            <tr><td>보정 적용 후 점수</td><td class="r">{{ n(v.corrected) }}</td><td>보정 적용 규칙: {{ v.correctionRule }}</td></tr>
+            <tr><td>보정 적용 후 점수</td><td class="r">{{ n(v.corrected) }}</td><td>부서 KPI 반영 점수 + 개인별 보정값</td></tr>
             <tr><td>최종 점수 직접 수정</td><td class="r">{{ v.override ? fmt(v.override.score) : '없음' }}</td><td>{{ v.override ? `수정 전 ${v.override.before === null ? '계산 보류' : fmt(v.override.before)} → 수정 후 ${fmt(v.override.score)} · 사유: ${v.override.reason} · ${v.override.by} · ${localDateTime(v.override.at)}` : '-' }}</td></tr>
           </template>
           <template v-else>
@@ -104,19 +102,6 @@ const adjText = (a) => (!a ? '조정 없음' : a.type === 'reset' ? '조정 해�
         </tbody>
       </table>
 
-      <template v-if="v.history?.length">
-        <h3>보정·점수 변경 이력 (확정 시점까지)</h3>
-        <table class="grid small">
-          <thead><tr><th>시각</th><th>유형</th><th class="r">변경 전 → 후 값</th><th>사유</th><th>변경자</th></tr></thead>
-          <tbody>
-            <tr v-for="h in v.history" :key="h.id">
-              <td>{{ localDateTime(h.at) }}</td><td>{{ KIND[h.kind] }}</td>
-              <td class="r">{{ histVal(h, h.beforeValue) }} → {{ histVal(h, h.afterValue) }}</td><td>{{ h.reason || '-' }}</td><td>{{ h.by }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </template>
-
       <h2>5. 최종 등급</h2>
       <div class="grade-box">
         <div class="grade">{{ v.grade ?? '미확정' }}</div>
@@ -124,8 +109,8 @@ const adjText = (a) => (!a ? '조정 없음' : a.type === 'reset' ? '조정 해�
       </div>
 
       <p class="legend">
-        원점수는 평가 항목 배점 기준 점수, 단계 점수는 이를 100점 기준으로 바꾼 값입니다. 개인평가 점수(가중치 적용)와 백분위는 서로 다른 값이며,
-        KPI 반영 결과, 부서별·개인별 보정값, 최종 점수 직접 수정은 각각 따로 기록되어 서로 덮어쓰지 않습니다. 이 보고서는 최종 확정 당시 값으로 작성되었습니다.
+        원점수는 평가 항목 배점 기준 점수, 단계 점수는 이를 100점 기준으로 바꾼 값입니다. 개인평가 점수(가중치 적용),
+        부서 KPI 반영 점수, 개인별 보정값, 최종 점수 직접 수정은 각각 따로 기록되어 서로 덮어쓰지 않습니다. 이 보고서는 최종 확정 당시 값으로 작성되었습니다.
       </p>
     </template>
     <p v-else>최종 확정된 결과가 없어 보고서를 만들 수 없습니다.</p>

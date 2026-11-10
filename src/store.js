@@ -1,7 +1,8 @@
-import { reactive, watch } from 'vue'
-import { ROLE_STAGES, roleLabel } from './constants'
-import { SEED_PERIOD, seedEmployees, seedItems, seedEvaluations, seedExecAssign } from './seed'
+import { reactive, watch, watchEffect } from 'vue'
+import { ROLE_STAGES, roleLabel, DEFAULT_ROLE_RATIOS, OLD_DEFAULT_ROLE_RATIOS } from './constants'
+import { SEED_PERIOD, seedEmployees, seedItems, seedEvaluations, seedExecAssign, seedTeamKpi } from './seed'
 import { pointsReport, totalText } from './points'
+import { i18n, t, dt } from './i18n'
 
 // Rollent 데이터 저장소.
 // 서버 없이 브라우저 localStorage에 저장한다. 같은 브라우저 안에서만 유지되고
@@ -26,23 +27,21 @@ function createInitialData() {
       memberEvalEnabled: true, // 팀장에 대한 팀원평가
       itemScoreRule: null, // 미확정: 항목 안 여러 문항 → 항목 점수
       multiEvaluatorRule: null, // 미확정: 한 단계 평가자가 여럿일 때
-      percentileMethod: null,
-      percentileGroup: null,
       kpiMethod: null,
       kpiBase: null,
       kpiMixRatio: null,
       grade: { ratios: { A: null, B: null, C: null, D: null }, rounding: null, ties: null },
       ...POLICY_DEFAULTS_V3,
     },
-    // 사원: 2차 작업 지시로 확정된 단계별 가중치(본인 20 · 팀장 40 · 본부장(임원) 40)
-    // 팀장: 2차가 팀원평가라 지시된 가중치와 구조가 달라 미설정으로 둔다
-    weights: { member: { ...CONFIRMED_MEMBER_WEIGHTS }, leader: { self: null, members: null, exec: null } },
+    // 단계별 가중치. 사원은 2차 작업 지시값(본인 20 · 팀장 40 · 임원 40), 팀장·임원은 사원과 같은 비율로 둔다
+    weights: clone(DEFAULT_WEIGHTS),
     execAssign,
     execAssignIsTest: true,
     evaluations: seedEvaluations(users, items, execAssign),
-    kpiScores: {}, // { teamId: 점수 }
+    kpiScores: {}, // (이전 방식) 부서 KPI 점수. 팀 KPI의 '직접 입력'으로 옮긴다
+    teamKpi: {}, // { periodId: { teamId: { mode: 'indicators' | 'direct', direct, indicators: [] } } }
+    roleRatios: clone(DEFAULT_ROLE_RATIOS), // 직급별 최종 반영 비율
     adjustments: [], // (이전 방식) 개인 점수 조정. 2차 작업 이후로는 쓰지 않고 이력으로만 보존
-    deptCorrections: {}, // { teamId: { value, reason, savedAt, by } } 부서별 보정값
     personCorrections: {}, // { userId: { value, reason, savedAt, by } } 개인별 보정값
     overrides: {}, // { userId: { score, before, reason, at, by } } 최종 점수 직접 수정
     auditLog: [], // 보정·직접 수정 변경 이력 (삭제하지 않는다)
@@ -55,32 +54,32 @@ function createInitialData() {
 
 // 2차 작업에서 추가한 정책. 모두 미설정(null)에서 시작한다.
 const POLICY_DEFAULTS_V3 = {
-  percentileTies: null, // 백분위 동점자 처리
-  percentileExclusion: null, // 백분위 비교 대상 제외 기준
-  correctionRule: null, // 부서별·개인별 보정값 적용 규칙
   overrideRange: null, // 최종 점수 직접 수정 허용 범위 (후보 없음)
   approvalProcess: null, // 직접 수정·보정 승인 절차 (후보 없음)
   finalizeRule: null, // 결과 확정·재계산 규칙 (후보 없음)
   disclosure: null, // 평가자 이름·서술형 응답·직원 결과 공개 범위 (후보 없음)
 }
 export const CONFIRMED_MEMBER_WEIGHTS = { self: 20, leader: 40, exec: 40 }
+// 팀장: 자기 20 · 팀원(상향) 40 · 임원 40 / 임원: 자기 20 · 상향 80
+export const DEFAULT_WEIGHTS = { member: { ...CONFIRMED_MEMBER_WEIGHTS }, leader: { self: 20, members: 40, exec: 40 }, exec: { self: 20, upward: 80 } }
+const clone = (x) => JSON.parse(JSON.stringify(x))
 
-// 관리자 계정. 최종 점수 직접 수정은 canOverride 권한이 있는 계정만 할 수 있다.
+// 관리자 계정. 최종 점수 직접 수정은 canOverride 권한이 있는 계정만 할 수 있다(관리자에게 부여).
 function seedAdmins() {
   return [
-    { id: 'admin', name: '관리자', empNo: '0000', title: '인사 관리자', canOverride: false },
-    { id: 'ceo', name: '대표자', empNo: '0001', title: '대표자', canOverride: true },
+    { id: 'admin', name: '관리자', empNo: '0000', title: '인사 관리자', canOverride: true },
   ]
 }
 
 // 이전 버전 데이터에 새 항목을 덧붙인다. 기존 직원·응답·설정은 그대로 둔다.
 function migrate(data) {
   data.settings = { ...POLICY_DEFAULTS_V3, ...data.settings }
-  for (const k of ['deptCorrections', 'personCorrections', 'overrides']) data[k] ??= {}
+  for (const k of ['personCorrections', 'overrides']) data[k] ??= {}
   data.auditLog ??= []
   data.adjustments ??= []
-  data.admins.forEach((a) => { a.canOverride ??= false; a.title ??= '인사 관리자' })
-  if (!data.admins.some((a) => a.id === 'ceo')) data.admins.push(seedAdmins()[1])
+  // 대표자 계정은 없애고 최종 점수 직접 수정 권한을 관리자에게 준다(기존 수정 기록은 그대로 둔다)
+  data.admins = data.admins.filter((a) => a.id !== 'ceo')
+  data.admins.forEach((a) => { a.title ??= '인사 관리자'; if (a.id === 'admin') a.canOverride = true; a.canOverride ??= false })
   // 사원 가중치가 아직 비어 있을 때만 지시된 값으로 채운다(관리자가 이미 넣은 값은 건드리지 않음)
   const w = data.weights.member
   if (w.self === null && w.leader === null && w.exec === null) data.weights.member = { ...CONFIRMED_MEMBER_WEIGHTS }
@@ -113,6 +112,53 @@ function migrate(data) {
       delete u.evalTarget
     }
   })
+  // 팀 KPI: 이전 부서 KPI 점수는 '직접 입력' 값으로 옮긴다
+  data.teamKpi ??= {}
+  const tk = (data.teamKpi[data.period.id] ??= {})
+  Object.entries(data.kpiScores ?? {}).forEach(([tid, v]) => {
+    if (typeof v === 'number' && !tk[tid]) tk[tid] = { mode: 'direct', direct: v, indicators: [] }
+  })
+  data.kpiScores = {}
+  data.roleRatios ??= clone(DEFAULT_ROLE_RATIOS)
+  // 평가 회차: 회차 목록과, 선택하지 않은 회차의 평가 정보·결과 보관함
+  // 등급: 상대평가(순위 비율, 기존 방식)와 절대평가(점수 기준) 중 선택
+  data.settings.grade.mode ??= 'relative'
+  data.settings.grade.cutoffs ??= { A: null, B: null, C: null }
+  Object.values(data.periodData ?? {}).forEach((p) => {
+    p.settings.grade.mode ??= 'relative'
+    p.settings.grade.cutoffs ??= { A: null, B: null, C: null }
+  })
+  data.periods ??= [{ ...data.period }]
+  data.periodData ??= {}
+  // 백분위·보정 적용 규칙은 쓰지 않는다 (부서별 보정을 없애고 개인별 보정만 바로 반영)
+  for (const k of ['percentileMethod', 'percentileGroup', 'percentileTies', 'percentileExclusion', 'correctionRule']) delete data.settings[k]
+  // 팀 KPI 예시 값: 처음 한 번만, 아직 KPI가 없는 팀에 넣는다
+  if (!data.kpiSeeded) {
+    Object.entries(seedTeamKpi(data.teams)).forEach(([tid, v]) => { tk[tid] ??= v })
+    data.kpiSeeded = true
+  }
+  // 팀원평가·상향평가를 단계 가중치에 넣는다. 비어 있는 가중치만 기본값으로 채운다
+  const lw = data.weights.leader ?? {}
+  if (['self', 'members', 'exec'].every((k) => typeof lw[k] !== 'number')) data.weights.leader = { ...DEFAULT_WEIGHTS.leader }
+  else if (!('members' in lw)) lw.members = null
+  data.weights.exec ??= { ...DEFAULT_WEIGHTS.exec }
+  // 직급별 비율에서 상향평가 칸을 뺀다(개인평가 안으로 옮김). 이전 기본값 그대로면 새 기본값으로 바꾼다
+  for (const role of ['member', 'leader', 'exec']) {
+    const r = data.roleRatios[role]
+    if (!r) { data.roleRatios[role] = clone(DEFAULT_ROLE_RATIOS[role]); continue }
+    if (OLD_DEFAULT_ROLE_RATIOS[role] && JSON.stringify(r) === JSON.stringify(OLD_DEFAULT_ROLE_RATIOS[role])) data.roleRatios[role] = clone(DEFAULT_ROLE_RATIOS[role])
+    else {
+      delete r.upward
+      r.personal ??= { on: false, value: null }
+      r.kpi ??= { on: false, value: null }
+    }
+  }
+  // 임원 상향평가 단계가 생겼으므로, 그 단계 문항이 하나도 없으면 기본 항목을 넣는다(기존 항목은 그대로)
+  if (data.items.length && !data.items.some((it) => it.stages.includes('upward'))) {
+    const up = seedItems().find((it) => it.stages.length === 1 && it.stages[0] === 'upward')
+    const used = new Set(data.items.flatMap((it) => [it.id, ...it.questions.map((q) => q.id)]))
+    if (!used.has(up.id) && !up.questions.some((q) => used.has(q.id))) data.items.push(up)
+  }
   return data
 }
 
@@ -146,6 +192,25 @@ watch(db, () => {
   saveTimer = setTimeout(saveNow, 150)
 }, { deep: true })
 
+// 전체 삭제: 고른 범위의 데이터를 비운다. 관리자 계정·정책 설정·가중치·직급별 비율·평가 회차는 남긴다.
+// 평가 응답·결과, 평가 문항, 팀 KPI는 지금 선택한 회차만 지운다(다른 회차는 그대로).
+// 직원·부서는 모든 회차가 함께 쓰므로, people을 지우면 모든 회차의 평가 응답·결과와 대상 명단·팀 KPI도 함께 지운다.
+export function wipeData({ evaluations = false, people = false, items = false, kpi = false }) {
+  const pid = db.period.id
+  if (evaluations || people) Object.assign(db, emptyResults())
+  if (people) {
+    Object.values(db.periodData).forEach((p) => Object.assign(p, emptyResults()))
+    db.users = []
+    db.teams = []
+    db.execAssign = {}
+    db.execAssignSource = {}
+    db.evalTargets = Object.fromEntries(db.periods.map((p) => [p.id, {}]))
+    db.teamKpi = Object.fromEntries(db.periods.map((p) => [p.id, {}]))
+  }
+  if (items) db.items = []
+  if (kpi) db.teamKpi[pid] = {}
+}
+
 // 관리자가 누르는 '테스트 데이터로 되돌리기'
 export function resetData() {
   const fresh = migrate(createInitialData())
@@ -154,6 +219,72 @@ export function resetData() {
 }
 
 export const newId = () => db.nextId++
+
+// ---- 평가 회차 ----
+// 선택한 회차의 평가 정보·결과는 지금처럼 db 최상위 필드에서 쓰고, 다른 회차는 periodData[회차 id]에 보관한다.
+// 평가 대상 명단(evalTargets)과 팀 KPI(teamKpi)는 원래 회차 id별로 저장된다.
+const PERIOD_CONFIG = ['items', 'weights', 'roleRatios', 'settings'] // 복제하는 평가 정보
+const PERIOD_RESULTS = ['evaluations', 'finalized', 'personCorrections', 'overrides', 'interviewNotes', 'auditLog', 'adjustments'] // 복제하지 않는 평가 결과
+function emptyResults() {
+  return { evaluations: {}, finalized: {}, personCorrections: {}, overrides: {}, interviewNotes: {}, auditLog: [], adjustments: [] }
+}
+const pick = (keys) => clone(Object.fromEntries(keys.map((k) => [k, db[k]])))
+
+// 회차 목록 (선택한 회차는 화면에서 고친 이름·기간이 바로 보이도록 db.period를 쓴다)
+export const periodList = () => db.periods.map((p) => (p.id === db.period.id ? db.period : p))
+
+function stashActive() {
+  const id = db.period.id
+  db.periods = db.periods.map((p) => (p.id === id ? { ...db.period } : p))
+  db.periodData[id] = pick([...PERIOD_CONFIG, ...PERIOD_RESULTS])
+}
+function loadPeriod(id) {
+  Object.assign(db, db.periodData[id])
+  delete db.periodData[id]
+  db.period = { ...db.periods.find((p) => p.id === id) }
+}
+
+export function switchPeriod(id) {
+  if (id === db.period.id || !db.periodData[id]) return
+  stashActive()
+  loadPeriod(id)
+}
+
+// 팀 KPI는 지표(이름·적용 범위·목표·단위·방향·가중치)만 복제하고 실적과 직접 입력 점수는 비운다
+function kpiPlanOf(periodId) {
+  return Object.fromEntries(Object.entries(db.teamKpi[periodId] ?? {}).map(([tid, t]) => [tid, {
+    mode: t.mode, direct: null, indicators: (t.indicators ?? []).map((i) => ({ ...clone(i), actual: null })),
+  }]))
+}
+
+// 선택한 회차의 평가 정보(문항·가중치·직급별 비율·계산 규칙·팀 KPI 지표와 목표)와 평가 대상 명단만 복제한다.
+// 응답·확정 결과·보정·직접 수정·면담 기록·팀 KPI 실적은 복제하지 않는다. 복제한 회차로 바로 이동한다.
+export function clonePeriod(meta) {
+  const id = `P${newId()}`
+  const config = pick(PERIOD_CONFIG)
+  const roster = clone(db.evalTargets[db.period.id] ?? {})
+  const kpiPlan = kpiPlanOf(db.period.id)
+  stashActive()
+  db.periods.push({ id, ...meta })
+  db.periodData[id] = { ...config, ...emptyResults() }
+  db.evalTargets[id] = roster
+  db.teamKpi[id] = kpiPlan
+  loadPeriod(id)
+  return id
+}
+
+// 회차와 그 회차의 평가 정보·결과를 모두 지운다. 회차가 하나뿐이면 지울 수 없다.
+export function deletePeriod(id) {
+  if (db.periods.length < 2) throw new Error('회차가 하나뿐이라 삭제할 수 없습니다.')
+  if (id === db.period.id) {
+    stashActive()
+    loadPeriod(db.periods.find((p) => p.id !== id).id)
+  }
+  delete db.periodData[id]
+  db.periods = db.periods.filter((p) => p.id !== id)
+  delete db.evalTargets[id]
+  delete db.teamKpi[id]
+}
 
 // ---- 세션 (탭을 닫으면 사라진다) ----
 
@@ -171,6 +302,8 @@ export const store = reactive({
   confirmState: null,
   printJob: null, // { kind: 'final' | 'interview', userIds }
 })
+// 관리자 화면은 한국어로만 보여준다
+watchEffect(() => { i18n.adminView = store.session?.kind === 'admin' })
 
 function saveSession() {
   try {
@@ -189,8 +322,8 @@ export function login(name, empNo) {
     store.session = { kind: 'admin', id: admin.id }
   } else {
     const user = db.users.find((u) => u.name === n && u.empNo === e)
-    if (!user) return { ok: false, message: '이름 또는 사번이 맞지 않습니다.' }
-    if (!user.active) return { ok: false, message: '비활성화된 계정입니다. 관리자에게 문의하세요.' }
+    if (!user) return { ok: false, message: t('login.bad') }
+    if (!user.active) return { ok: false, message: t('login.inactive') }
     store.session = { kind: 'user', id: user.id }
   }
   saveSession()
@@ -304,6 +437,10 @@ export function evaluatorsFor(target, stage) {
     const e = userById(db.execAssign[target.id])
     return e && e.active && e.role === 'exec' ? [e] : []
   }
+  if (stage === 'upward') {
+    if (target.role !== 'exec') return []
+    return db.users.filter((u) => u.active && u.role === 'leader' && db.execAssign[u.id] === target.id)
+  }
   return []
 }
 
@@ -346,36 +483,32 @@ export function validateAnswers(stage, answers) {
   questionsFor(stage).forEach((q) => {
     const v = answers[q.id]
     const empty = v === undefined || v === null || String(v).trim() === ''
-    if (q.required && empty) problems.push({ questionId: q.id, message: `'${q.text}' 문항에 응답해 주세요.` })
+    if (q.required && empty) problems.push({ questionId: q.id, message: t('v.required', { q: dt(q.text) }) })
     if (!empty && q.type === 'choice' && !q.choices.some((c) => c.id === v && !c.deleted)) {
-      problems.push({ questionId: q.id, message: `'${q.text}' 문항의 선택지가 바뀌었습니다. 다시 선택해 주세요.` })
+      problems.push({ questionId: q.id, message: t('v.choiceChanged', { q: dt(q.text) }) })
     }
     if (!empty && q.type !== 'choice' && q.maxLength && String(v).length > q.maxLength) {
-      problems.push({ questionId: q.id, message: `'${q.text}' 문항은 ${q.maxLength}자까지 입력할 수 있습니다.` })
+      problems.push({ questionId: q.id, message: t('v.tooLong', { q: dt(q.text), n: q.maxLength }) })
     }
   })
   return problems
 }
 
 export function saveEvaluation(stage, target, evaluator, answers, submit) {
-  if (!canEvaluate(evaluator.id, stage, target.id)) throw new Error('배정되지 않은 평가입니다.')
+  if (!canEvaluate(evaluator.id, stage, target.id)) throw new Error(t('ev.errNotAssigned'))
   const key = evalKey(stage, target.id, evaluator.id)
   const now = new Date().toISOString()
   const prev = db.evaluations[key]
-  if (prev?.status === 'submitted') throw new Error('이미 제출한 평가입니다.')
+  if (prev?.status === 'submitted') throw new Error(t('ev.errSubmitted'))
   db.evaluations[key] = {
     key, stage, targetId: target.id, evaluatorId: evaluator.id, targetRole: target.role, evaluatorRole: evaluator.role,
     answers: { ...answers }, status: submit ? 'submitted' : 'draft', updatedAt: now, submittedAt: submit ? now : null,
   }
 }
 
-// 관리자: 제출된 평가를 다시 작성할 수 있게 연다
-export function reopenEvaluation(key) {
-  const ev = db.evaluations[key]
-  if (ev) {
-    ev.status = 'draft'
-    ev.submittedAt = null
-  }
+// 관리자: 제출된 평가를 삭제한다. 평가자는 '시작 전' 상태에서 처음부터 다시 응답한다.
+export function deleteEvaluation(key) {
+  delete db.evaluations[key]
 }
 
 // 평가 문항 저장. 화면 검사와 별도로 여기서도 평가표별 배점 합계(100점)를 확인하고, 맞지 않으면 저장하지 않는다.
@@ -434,14 +567,6 @@ export const canOverride = () => store.session?.kind === 'admin' && !!currentUse
 
 function audit(entry) {
   db.auditLog.push({ id: newId(), at: new Date().toISOString(), by: actorName(), ...entry })
-}
-
-// 부서별 보정값 저장. value가 null이면 '미입력'으로 되돌린다(초기화). affected: [{ userId, before, after }] 예상값
-export function saveDeptCorrection(teamId, value, reason, affected = []) {
-  const prev = db.deptCorrections[teamId]?.value ?? null
-  if (value === null) delete db.deptCorrections[teamId]
-  else db.deptCorrections[teamId] = { value, reason: reason || '', savedAt: new Date().toISOString(), by: actorName() }
-  audit({ kind: 'dept', teamId, userId: null, beforeValue: prev, afterValue: value, beforeScore: null, afterScore: null, reason: reason || '', affected })
 }
 
 // 개인별 보정값 저장. beforeScore/afterScore는 '이 보정값만 적용했을 때' 예상 점수

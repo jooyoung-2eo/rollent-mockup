@@ -47,7 +47,7 @@ function addTeam() {
 async function removeTeam(team) {
   const count = db.users.filter((u) => u.teamId === team.id).length
   if (count) return toast(`'${team.name}'에 직원 ${count}명(비활성 포함)이 있어 삭제할 수 없습니다. '구성원 배정'에서 다른 부서로 옮기거나 소속을 해제한 뒤 삭제하세요.`, 'warning')
-  const extras = [db.kpiScores[team.id] !== undefined && 'KPI 점수', db.deptCorrections[team.id] && '부서별 보정값'].filter(Boolean)
+  const extras = [db.teamKpi[db.period.id]?.[team.id] && '팀 KPI'].filter(Boolean)
   const ok = await confirmDialog({
     title: '부서 삭제',
     message: `'${team.name}' 부서를 삭제합니다. 직원은 삭제되지 않습니다.${extras.length ? `\n이 부서에 저장된 ${extras.join('·')}도 함께 지워집니다(변경 이력은 남음).` : ''}`,
@@ -55,8 +55,7 @@ async function removeTeam(team) {
   })
   if (!ok) return
   db.teams = db.teams.filter((t) => t.id !== team.id)
-  delete db.kpiScores[team.id]
-  delete db.deptCorrections[team.id]
+  if (db.teamKpi[db.period.id]) delete db.teamKpi[db.period.id][team.id]
   if (teamFilter.value === team.id) teamFilter.value = 'all'
   toast(`'${team.name}' 부서를 삭제했습니다.`)
 }

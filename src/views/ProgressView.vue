@@ -3,7 +3,7 @@ import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   db, teamName, allAssignments, getEvaluation, evalStatus, stagesFor, evaluatorsFor, stageStatus, targetStatus,
-  reopenEvaluation, toast, confirmDialog, sortUsers, isEvalTarget, EVAL_STATUS_LABEL, resetData,
+  deleteEvaluation, wipeData, periodList, toast, confirmDialog, sortUsers, isEvalTarget, EVAL_STATUS_LABEL, resetData,
 } from '../store'
 import { stageLabel, roleLabel, localDateTime } from '../constants'
 import DeptProgress from '../components/DeptProgress.vue'
@@ -43,8 +43,13 @@ const targetRows = computed(() => targets.value
     user: u,
     status: targetStatus(u),
     self: stageStatus(u, 'self'),
-    second: u.role === 'member' ? stageStatus(u, 'leader') : u.role === 'leader' ? stageStatus(u, 'members') : 'off',
-    secondCount: u.role === 'leader' && stagesFor(u).includes('members') ? `${evaluatorsFor(u, 'members').filter((e) => evalStatus(getEvaluation('members', u.id, e.id)) === 'done').length}/${evaluatorsFor(u, 'members').length}` : '',
+    second: u.role === 'member' ? stageStatus(u, 'leader') : u.role === 'leader' ? stageStatus(u, 'members') : stageStatus(u, 'upward'),
+    secondCount: (() => {
+      const st = u.role === 'leader' ? 'members' : u.role === 'exec' ? 'upward' : null
+      if (!st || !stagesFor(u).includes(st)) return ''
+      const ev = evaluatorsFor(u, st)
+      return ev.length ? `${ev.filter((e) => evalStatus(getEvaluation(st, u.id, e.id)) === 'done').length}/${ev.length}` : ''
+    })(),
     exec: stageStatus(u, 'exec'),
   }))
   .filter((r) => statusF.value === 'all' || r.status === statusF.value))
@@ -75,11 +80,35 @@ const detailStages = computed(() => detail.value ? stagesFor(detail.value).map((
   past: Object.values(db.evaluations).filter((ev) => ev.stage === s && ev.targetId === detail.value.id && !evaluatorsFor(detail.value, s).some((e) => e.id === ev.evaluatorId)),
 })) : [])
 
-async function reopen(ev) {
-  const ok = await confirmDialog({ title: '재작성 허용', message: '제출된 평가를 다시 작성할 수 있게 엽니다. 평가자가 다시 제출할 때까지 이 단계는 미완료가 됩니다.', okText: '재작성 허용' })
+async function removeEvaluation(ev, who) {
+  const finalized = db.finalized[ev.targetId] ? '\n이 대상자는 이미 최종 확정되어 있습니다. 확정값은 그대로 남고, 평가 결과 화면에 재계산 다름으로 표시될 수 있습니다.' : ''
+  const ok = await confirmDialog({
+    title: '제출된 평가 삭제',
+    message: `${who}님이 제출한 ${stageLabel(ev.stage)}를 삭제합니다.\n응답 내용은 되돌릴 수 없으며, ${who}님은 처음부터 다시 응답해야 합니다. 다시 제출할 때까지 이 단계는 미완료로 계산됩니다.${finalized}`,
+    okText: '삭제',
+    danger: true,
+  })
   if (!ok) return
-  reopenEvaluation(ev.key)
-  toast('재작성을 허용했습니다.')
+  if (viewing.value?.ev.key === ev.key) viewing.value = null
+  deleteEvaluation(ev.key)
+  toast(`${who}님의 ${stageLabel(ev.stage)}를 삭제했습니다. 다시 응답할 수 있습니다.`)
+}
+// 전체 삭제
+const wipe = ref(null) // { evaluations, people, items, kpi, typed }
+const otherPeriods = computed(() => periodList().filter((p) => p.id !== db.period.id).map((p) => p.name))
+function openWipe() {
+  wipe.value = { evaluations: true, people: true, items: true, kpi: true, typed: '' }
+}
+const wipeReady = computed(() => wipe.value && wipe.value.typed.trim() === '전체 삭제' && (wipe.value.evaluations || wipe.value.people || wipe.value.items || wipe.value.kpi))
+function doWipe() {
+  if (!wipeReady.value) return
+  const w = wipe.value
+  wipeData({ evaluations: w.evaluations || w.people, people: w.people, items: w.items, kpi: w.kpi })
+  const done = [w.people && '직원·부서', (w.evaluations || w.people) && '평가 응답·결과', w.items && '평가 문항', w.kpi && '팀 KPI'].filter(Boolean)
+  const scope = w.people && otherPeriods.value.length ? '모든 회차에서' : `'${db.period.name}' 회차에서`
+  wipe.value = null
+  detail.value = null
+  toast(`${scope} ${done.join(', ')}을(를) 삭제했습니다.`, 'warning')
 }
 async function onReset() {
   const ok = await confirmDialog({ title: '테스트 데이터로 되돌리기', message: '이 브라우저에 저장된 모든 변경(직원, 문항, 응답, 설정, 조정 이력)을 지우고 처음 테스트 데이터로 되돌립니다.\n되돌릴 수 없습니다.', okText: '되돌리기', danger: true })
@@ -96,7 +125,10 @@ const time = localDateTime
   <div>
     <div class="page-header">
       <h1 class="page-title">진행현황</h1>
-      <button class="btn btn-outline-secondary btn-sm" @click="onReset">테스트 데이터로 되돌리기</button>
+      <div class="d-flex gap-2">
+        <button class="btn btn-outline-secondary btn-sm" @click="onReset">테스트 데이터로 되돌리기</button>
+        <button class="btn btn-outline-danger btn-sm" @click="openWipe">전체 삭제</button>
+      </div>
     </div>
 
     <section class="panel mb-3 period">
@@ -139,7 +171,7 @@ const time = localDateTime
       <div class="panel-head"><h2 class="panel-title">평가 대상자별 진행 상태 <span class="panel-sub">{{ targetRows.length }}명</span></h2><span class="panel-sub">이름을 누르면 단계별 상세를 봅니다.</span></div>
       <div class="table-responsive scroll">
         <table class="table table-clean table-sm" data-testid="target-table">
-          <thead><tr><th>부서</th><th>직급</th><th>이름</th><th>자기평가</th><th>팀장·팀원평가</th><th>임원평가</th><th>전체 상태</th></tr></thead>
+          <thead><tr><th>부서</th><th>직급</th><th>이름</th><th>자기평가</th><th>2차 (팀장·팀원·상향평가)</th><th>임원평가</th><th>전체 상태</th></tr></thead>
           <tbody>
             <tr v-for="r in targetRows" :key="r.user.id" :data-user="r.user.name">
               <td>{{ teamName(r.user.teamId) }}</td>
@@ -180,6 +212,28 @@ const time = localDateTime
       <p class="panel-sub mt-2 mb-0">자기평가는 대상자 표에서 확인합니다. 꺼진 단계(예: 임원 자기평가 사용 안 함)는 미완료로 세지 않습니다.</p>
     </section>
 
+    <AppModal v-if="wipe" title="전체 삭제" @close="wipe = null">
+      <p class="small">고른 데이터를 이 브라우저에서 지웁니다. <strong>되돌릴 수 없습니다.</strong> 관리자 계정, 정책 설정, 가중치, 직급별 비율, 평가 회차는 남습니다.</p>
+      <p class="small mb-2">평가 응답·결과, 평가 문항, 팀 KPI는 <strong>지금 회차({{ db.period.name }})</strong>만 지우고 다른 회차는 그대로 둡니다.</p>
+      <div class="d-flex flex-column gap-2 mb-3">
+        <label class="form-check-label"><input v-model="wipe.evaluations" type="checkbox" class="form-check-input me-2" :disabled="wipe.people" />평가 응답·결과 (응답, 최종 확정, 보정, 직접 수정, 면담 메모)</label>
+        <label class="form-check-label"><input v-model="wipe.people" type="checkbox" class="form-check-input me-2" />직원·부서·임원 배정 <span class="text-muted small">(직원을 지우면 평가 응답·결과도 함께 지워집니다)</span></label>
+        <label class="form-check-label"><input v-model="wipe.items" type="checkbox" class="form-check-input me-2" />평가 문항</label>
+        <label class="form-check-label"><input v-model="wipe.kpi" type="checkbox" class="form-check-input me-2" />팀 KPI</label>
+      </div>
+      <div v-if="wipe.people && otherPeriods.length" class="alert alert-danger small py-2" role="alert" data-testid="wipe-all-periods">
+        직원·부서는 모든 회차가 함께 씁니다. 지우면 다른 회차({{ otherPeriods.join(', ') }})의 평가 응답·결과·팀 KPI도 함께 지워집니다.
+        지금 회차의 데이터만 지우려면 '직원·부서·임원 배정'의 체크를 해제하세요.
+      </div>
+      <label class="form-label small" for="wipe-confirm">확인을 위해 <strong>전체 삭제</strong>라고 입력하세요</label>
+      <input id="wipe-confirm" v-model="wipe.typed" class="form-control" autocomplete="off" />
+      <p class="small text-muted mt-2 mb-0">삭제 후 직원은 '직원 및 부서 관리 › CSV 일괄 등록', 문항은 '평가 관리 › 문항 CSV 불러오기'로 다시 채울 수 있습니다.</p>
+      <template #footer>
+        <button class="btn btn-light" @click="wipe = null">취소</button>
+        <button class="btn btn-danger" :disabled="!wipeReady" @click="doWipe">삭제</button>
+      </template>
+    </AppModal>
+
     <AppModal v-if="detail" :title="`${detail.name} 평가 진행 상세`" size="lg" @close="detail = null; viewing = null">
       <p class="small text-muted">{{ teamName(detail.teamId) }} · {{ detail.position }} · {{ roleLabel(detail.role) }} · 전체 상태: {{ targetStatus(detail) }}</p>
       <div v-for="s in detailStages" :key="s.stage" class="mb-3">
@@ -193,7 +247,7 @@ const time = localDateTime
               <td>{{ time(r.ev?.updatedAt) }}</td>
               <td class="text-end text-nowrap">
                 <button v-if="r.ev" class="btn btn-link btn-sm p-0 me-2" @click="viewing = { stage: s.stage, ev: r.ev, who: r.evaluator.name }">응답 보기</button>
-                <button v-if="r.ev?.status === 'submitted'" class="btn btn-link btn-sm p-0" @click="reopen(r.ev)">재작성 허용</button>
+                <button v-if="r.ev?.status === 'submitted'" class="btn btn-link btn-sm p-0 text-danger" @click="removeEvaluation(r.ev, r.evaluator.name)">제출 삭제</button>
               </td>
             </tr>
           </tbody>

@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { db, store, toast, confirmDialog, teamName, membersOf, leadersOf } from '../store'
 import { GRADES, POLICY_OPTIONS, stageLabel, roleLabel, localDate, localDateTime } from '../constants'
-import { computeResults, gradeCheck, snapshotOf, snapshotDiffers, fmt, gradeRuleText, policyName } from '../scoring'
+import { computeResults, gradeCheck, snapshotOf, snapshotDiffers, fmt, gradeRuleText, policyName, ratioText } from '../scoring'
 import { toCsvLine } from '../csv'
 import AppModal from '../components/AppModal.vue'
 import SortableList from '../components/SortableList.vue'
@@ -21,7 +21,7 @@ function stateOf(v) {
 }
 const STATE_CLS = { 미완료: 'st-incomplete', 미설정: 'st-unset', 미확정: 'st-pending' }
 
-// ---- 1. 백분위·등급 기준 ----
+// ---- 1. 등급 기준 ----
 const ratioDraft = ref({ ...db.settings.grade.ratios })
 const ratioSum = computed(() => GRADES.reduce((a, g) => a + (typeof ratioDraft.value[g] === 'number' ? ratioDraft.value[g] : 0), 0))
 const ratioErrors = computed(() => {
@@ -37,13 +37,31 @@ function saveRatios() {
   db.settings.grade.ratios = { ...ratioDraft.value }
   toast('등급 비율을 저장했습니다.')
 }
+const GRADE_MODES = [
+  { key: 'relative', label: '상대평가', desc: '최종 점수 순위에 A~D 비율을 적용합니다.' },
+  { key: 'absolute', label: '절대평가', desc: '최종 점수가 기준 점수 이상이면 그 등급을 줍니다.' },
+]
+function setGradeMode(mode) {
+  db.settings.grade.mode = mode
+  toast(`등급 산출 방식을 ${GRADE_MODES.find((m) => m.key === mode).label}로 바꿨습니다.`)
+}
+const CUT_GRADES = ['A', 'B', 'C']
+const cutDraft = ref({ ...db.settings.grade.cutoffs })
+const cutErrors = computed(() => {
+  const c = cutDraft.value
+  if (CUT_GRADES.some((g) => typeof c[g] !== 'number')) return ['A·B·C 기준 점수를 모두 입력해 주세요.']
+  if (!(c.A > c.B && c.B > c.C)) return ['기준 점수는 A > B > C 순이어야 합니다.']
+  return []
+})
+function setCut(g, v) { cutDraft.value[g] = v === '' ? null : Number(v) }
+function saveCutoffs() {
+  if (cutErrors.value.length) return toast(cutErrors.value[0], 'warning')
+  db.settings.grade.cutoffs = { ...cutDraft.value }
+  toast('절대평가 기준 점수를 저장했습니다.')
+}
 function setGradePolicy(key, v) {
   db.settings.grade[key] = v || null
   toast('등급 산출 규칙을 저장했습니다.')
-}
-function setPolicy(key, v) {
-  db.settings[key] = v || null
-  toast('백분위 환산 규칙을 저장했습니다.')
 }
 const gradeCounts = computed(() => {
   const graded = results.value.rows.filter((r) => r.grade?.value)
@@ -73,7 +91,7 @@ const allChecked = computed({
 
 // ---- 3. 최종 확정 ----
 const canFinalize = (r) => (r.status === '완료' || r.status === '최종 확정')
-  && ['weighted', 'percentile', 'kpiAfter', 'final', 'grade'].every((k) => r[k].value !== null)
+  && ['weighted', 'kpiAfter', 'final', 'grade'].every((k) => r[k].value !== null)
 function finalizeRow(r) {
   const prev = db.finalized[r.user.id]
   db.finalized[r.user.id] = {
@@ -114,7 +132,7 @@ const detail = computed(() => (detailId.value ? results.value.byId[detailId.valu
 const val = (v) => (v.value === null ? `${stateOf(v)} · ${v.reason}` : fmt(v.value))
 const signed = (v) => (v === null || v === undefined ? '미입력' : `${v > 0 ? '+' : ''}${v}`)
 // 1차·2차·3차 단계 (팀장의 2차는 팀원평가)
-const stageAt = (r, n) => r.stages.find((s) => (n === 1 ? s.stage === 'self' : n === 2 ? ['leader', 'members'].includes(s.stage) : s.stage === 'exec'))
+const stageAt = (r, n) => r.stages.find((s) => (n === 1 ? s.stage === 'self' : n === 2 ? ['leader', 'members', 'upward'].includes(s.stage) : s.stage === 'exec'))
 // 최종 점수가 보류된 이유별 인원 (평가 미완료와 정책 미설정을 나눠 보여준다)
 const blockedSummary = computed(() => {
   const map = {}
@@ -176,8 +194,8 @@ const summarySections = computed(() => {
     return v.length ? fmt(v.reduce((a, b) => a + b, 0) / v.length) : '-'
   }
   const build = {
-    person: () => ({ head: ['이름', '부서', '직급', '상태', '개인평가 점수', '백분위', 'KPI 반영 후', '부서 보정', '개인 보정', '보정 적용 후', '직접 수정', '최종 점수', '등급'], rows: all.map((r) => [r.user.name, r.teamName, r.user.position, r.status, val(r.weighted), val(r.percentile), val(r.kpiAfter), signed(r.corr.dept), signed(r.corr.person), val(r.corrected), r.override ? r.override.score : '-', val(r.final), r.grade.value ?? stateOf(r.grade)]) }),
-    team: () => ({ head: ['부서', '인원', '가중치 적용 평균', 'KPI 적용 후 평균', '최종 점수 평균'], rows: db.teams.map((t) => { const l = all.filter((r) => r.user.teamId === t.id); return l.length ? [t.name, l.length, avg(l, 'weighted'), avg(l, 'kpiAfter'), avg(l, 'final')] : null }).filter(Boolean) }),
+    person: () => ({ head: ['이름', '부서', '직급', '상태', '개인평가 점수', '팀 KPI', 'KPI 반영 후', '개인 보정', '보정 적용 후', '직접 수정', '최종 점수', '등급'], rows: all.map((r) => [r.user.name, r.teamName, r.user.position, r.status, val(r.weighted), val(r.teamKpi), val(r.kpiAfter), signed(r.corr.person), val(r.corrected), r.override ? r.override.score : '-', val(r.final), r.grade.value ?? stateOf(r.grade)]) }),
+    team: () => ({ head: ['부서', '인원', '개인평가 평균', '비율 반영 후 평균', '최종 점수 평균'], rows: db.teams.map((t) => { const l = all.filter((r) => r.user.teamId === t.id); return l.length ? [t.name, l.length, avg(l, 'weighted'), avg(l, 'kpiAfter'), avg(l, 'final')] : null }).filter(Boolean) }),
     grade: () => ({ head: ['등급', '인원', '비율(%)'], rows: gradeCounts.value.map((g) => [g.g, g.n, g.pct]) }),
     progress: () => ({ head: ['상태', '인원'], rows: ['시작 전', '진행 중', '완료', '최종 확정'].map((s) => [s, all.filter((r) => r.status === s).length]) }),
   }
@@ -214,37 +232,36 @@ function exportSummary() {
 
     <!-- 기준 설정 -->
     <div class="row g-3 mb-3">
-      <section class="col-lg-5">
-        <div class="panel h-100">
-          <h2 class="panel-title mb-1">백분위</h2>
-          <p class="panel-sub">개인평가 점수(가중치 적용 점수)를 기준으로 따로 계산하며, KPI·보정 결과와 섞지 않습니다. 네 가지가 모두 정해져야 계산합니다.</p>
-          <label class="form-label small" for="p-method">산출 공식</label>
-          <select id="p-method" class="form-select form-select-sm mb-1" :value="db.settings.percentileMethod ?? ''" @change="setPolicy('percentileMethod', $event.target.value)">
-            <option value="">미설정</option>
-            <option v-for="o in POLICY_OPTIONS.percentileMethod" :key="o.key" :value="o.key">{{ o.label }}</option>
-          </select>
-          <div class="small text-muted mb-2">{{ POLICY_OPTIONS.percentileMethod.find((o) => o.key === db.settings.percentileMethod)?.desc }}</div>
-          <label class="form-label small" for="p-group">비교 집단</label>
-          <select id="p-group" class="form-select form-select-sm mb-2" :value="db.settings.percentileGroup ?? ''" @change="setPolicy('percentileGroup', $event.target.value)">
-            <option value="">미설정</option>
-            <option v-for="o in POLICY_OPTIONS.percentileGroup" :key="o.key" :value="o.key">{{ o.label }}</option>
-          </select>
-          <label class="form-label small" for="p-ties">동점자 처리</label>
-          <select id="p-ties" class="form-select form-select-sm mb-2" :value="db.settings.percentileTies ?? ''" @change="setPolicy('percentileTies', $event.target.value)">
-            <option value="">미설정</option>
-            <option v-for="o in POLICY_OPTIONS.percentileTies" :key="o.key" :value="o.key">{{ o.label }}</option>
-          </select>
-          <label class="form-label small" for="p-excl">비교 대상 제외 기준 (미완료자 등)</label>
-          <select id="p-excl" class="form-select form-select-sm" :value="db.settings.percentileExclusion ?? ''" @change="setPolicy('percentileExclusion', $event.target.value)">
-            <option value="">미설정</option>
-            <option v-for="o in POLICY_OPTIONS.percentileExclusion" :key="o.key" :value="o.key">{{ o.label }}</option>
-          </select>
-          <div class="small text-muted mt-1">{{ POLICY_OPTIONS.percentileExclusion.find((o) => o.key === db.settings.percentileExclusion)?.desc }}</div>
-        </div>
-      </section>
-      <section class="col-lg-7">
+      <section class="col-12">
         <div class="panel h-100">
           <h2 class="panel-title mb-1">최종 등급 기준</h2>
+          <div class="d-flex flex-wrap gap-3 align-items-center mb-2" role="radiogroup" aria-label="등급 산출 방식">
+            <label v-for="m in GRADE_MODES" :key="m.key" class="form-check mb-0">
+              <input :id="'g-mode-' + m.key" class="form-check-input" type="radio" name="g-mode" :value="m.key" :checked="db.settings.grade.mode === m.key" @change="setGradeMode(m.key)" />
+              <span class="form-check-label fw-semibold">{{ m.label }}</span> <span class="small text-muted">{{ m.desc }}</span>
+            </label>
+          </div>
+          <template v-if="db.settings.grade.mode === 'absolute'">
+            <p class="panel-sub">최종 점수(보정·직접 수정 반영 후)가 기준 점수 이상이면 그 등급입니다. C 기준 미만은 D입니다.</p>
+            <div class="ratios">
+              <div v-for="g in CUT_GRADES" :key="g">
+                <label class="form-label small" :for="'c-' + g">{{ g }}등급</label>
+                <div class="input-group input-group-sm">
+                  <input :id="'c-' + g" type="number" class="form-control" :value="cutDraft[g] ?? ''" placeholder="미설정" @input="setCut(g, $event.target.value)" />
+                  <span class="input-group-text">점 이상</span>
+                </div>
+              </div>
+              <div>
+                <span class="form-label small d-block">D등급</span>
+                <div class="small pt-1">{{ typeof cutDraft.C === 'number' ? `${cutDraft.C}점 미만` : 'C 기준 미만' }}</div>
+              </div>
+              <div class="align-self-end">
+                <button class="btn btn-primary btn-sm" @click="saveCutoffs">기준 저장</button>
+              </div>
+            </div>
+            <div class="small mt-1"><span v-for="e in cutErrors" :key="e" class="text-danger">{{ e }}</span></div>
+          </template>
+          <template v-else>
           <p class="panel-sub">최종 점수(보정·직접 수정 반영 후) 순위에 비율을 적용합니다. 비율·반올림·동점자 처리는 정해지지 않아 처음에는 비어 있습니다.</p>
           <div class="ratios">
             <div v-for="g in GRADES" :key="g">
@@ -277,6 +294,7 @@ function exportSummary() {
               </select>
             </div>
           </div>
+          </template>
           <div class="grade-dist mt-2" data-testid="grade-dist">
             <span v-if="!gradeCheck().valid" class="badge text-bg-secondary">{{ gradeCheck().reason }}</span>
             <template v-else>
@@ -317,7 +335,7 @@ function exportSummary() {
       </div>
       <div class="legend small mb-2">
         <span class="st st-incomplete">미완료</span> 평가가 끝나지 않음 ·
-        <span class="st st-unset">미설정</span> 관리자 설정(가중치·규칙·KPI)이 비어 있음 ·
+        <span class="st st-unset">미설정</span> 관리자 설정(가중치·규칙·팀 KPI·비율)이 비어 있음 ·
         <span class="st st-pending">미확정</span> 앞 단계 값이 없어 계산 불가. 칸에 마우스를 올리면 이유가 보입니다.
       </div>
       <div class="table-responsive scroll">
@@ -326,8 +344,8 @@ function exportSummary() {
             <tr>
               <th><input v-model="allChecked" class="form-check-input" type="checkbox" aria-label="전체 선택" /></th>
               <th>이름</th><th>부서</th><th class="text-center">1차</th><th class="text-center">2차</th><th class="text-center">3차</th>
-              <th class="text-end">개인평가 점수</th><th class="text-end">백분위</th><th class="text-end">KPI 반영 후</th>
-              <th class="text-end">부서 보정</th><th class="text-end">개인 보정</th><th class="text-end">보정 적용 후</th><th class="text-end">직접 수정</th>
+              <th class="text-end">개인평가 점수</th><th class="text-end" title="개인평가 점수에 팀 KPI를 직급별 비율로 반영한 점수">KPI 반영 후</th>
+              <th class="text-end">개인 보정</th><th class="text-end">보정 적용 후</th><th class="text-end">직접 수정</th>
               <th class="text-end final-col">최종 점수</th><th>등급</th><th>확정</th>
             </tr>
           </thead>
@@ -340,11 +358,10 @@ function exportSummary() {
                 <span v-if="!stageAt(r, n)" class="text-muted small">해당 없음</span>
                 <span v-else class="done-mark" :class="stageAt(r, n).status">{{ STAGE_MARK[stageAt(r, n).status] }}</span>
               </td>
-              <td v-for="k in ['weighted', 'percentile', 'kpiAfter']" :key="k" class="text-end num" :title="r[k].reason || ''">
+              <td v-for="k in ['weighted', 'kpiAfter']" :key="k" class="text-end num" :title="r[k].reason || ''">
                 <template v-if="r[k].value !== null">{{ fmt(r[k].value) }}</template>
                 <span v-else class="st" :class="STATE_CLS[stateOf(r[k])]">{{ stateOf(r[k]) }}</span>
               </td>
-              <td class="text-end num">{{ signed(r.corr.dept) }}</td>
               <td class="text-end num" :title="r.corr.personReason">{{ signed(r.corr.person) }}</td>
               <td class="text-end num" :title="r.corrected.reason || ''">
                 <template v-if="r.corrected.value !== null">{{ fmt(r.corrected.value) }}</template>
@@ -396,13 +413,10 @@ function exportSummary() {
       <table class="table table-sm table-clean small pipeline">
         <tbody>
           <tr><th>개인평가 점수</th><td>{{ val(detail.weighted) }}</td><td class="text-muted">Σ 단계 점수 × 가중치</td></tr>
-          <tr><th>백분위</th><td>{{ val(detail.percentile) }}</td><td class="text-muted">{{ ['percentileMethod', 'percentileGroup', 'percentileTies', 'percentileExclusion'].map((k) => policyName(k, db.settings[k])).join(' / ') }}</td></tr>
-          <tr><th>부서 KPI 적용 전</th><td>{{ val(detail.kpiBefore) }}</td><td class="text-muted">기준: {{ POLICY_OPTIONS.kpiBase.find((o) => o.key === db.settings.kpiBase)?.label ?? '미설정' }}</td></tr>
-          <tr><th>부서 KPI 점수</th><td>{{ detail.kpiScore ?? '-' }}</td><td class="text-muted">{{ teamName(detail.user.teamId) }}</td></tr>
-          <tr><th>부서 KPI 적용 후</th><td>{{ val(detail.kpiAfter) }}</td><td class="text-muted">{{ POLICY_OPTIONS.kpiMethod.find((o) => o.key === db.settings.kpiMethod)?.label ?? '미설정' }}</td></tr>
-          <tr><th>부서별 보정값</th><td>{{ signed(detail.corr.dept) }}</td><td class="text-muted">{{ detail.teamName }}{{ detail.corr.deptReason ? ` · 사유: ${detail.corr.deptReason}` : '' }}</td></tr>
+          <tr><th>팀 KPI 점수</th><td>{{ val(detail.teamKpi) }}</td><td class="text-muted">{{ teamName(detail.user.teamId) }}</td></tr>
+          <tr><th>부서 KPI 반영</th><td>{{ val(detail.kpiAfter) }}</td><td class="text-muted">{{ ratioText(detail.user.role) }}</td></tr>
           <tr><th>개인별 보정값</th><td>{{ signed(detail.corr.person) }}</td><td class="text-muted">{{ detail.corr.personReason ? `사유: ${detail.corr.personReason}` : '-' }}</td></tr>
-          <tr><th>보정 적용 후</th><td>{{ val(detail.corrected) }}</td><td class="text-muted">규칙: {{ policyName('correctionRule', db.settings.correctionRule) }}</td></tr>
+          <tr><th>보정 적용 후</th><td>{{ val(detail.corrected) }}</td><td class="text-muted">부서 KPI 반영 점수 + 개인별 보정값</td></tr>
           <tr><th>최종 점수 직접 수정</th><td>{{ detail.override ? `${detail.override.before === null ? '계산 보류' : fmt(detail.override.before)} → ${fmt(detail.override.score)}` : '없음' }}</td><td class="text-muted">{{ detail.override ? `${detail.override.reason} · ${detail.override.by} · ${localDateTime(detail.override.at)}` : '' }}</td></tr>
           <tr class="final-row"><th>최종 점수</th><td><strong>{{ val(detail.final) }}</strong></td><td class="text-muted">{{ detail.override ? '직접 수정값' : '보정 적용 후 점수' }}</td></tr>
           <tr><th>최종 등급</th><td><strong>{{ detail.grade.value ?? val(detail.grade) }}</strong></td><td class="text-muted">{{ gradeRuleText() }}</td></tr>

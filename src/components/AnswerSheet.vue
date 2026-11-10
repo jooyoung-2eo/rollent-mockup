@@ -1,7 +1,7 @@
 <script setup>
 import { computed } from 'vue'
 import { db } from '../store'
-import { answerTypeLabel } from '../constants'
+import { t, dt, answerTypeName } from '../i18n'
 
 // 평가 문항과 응답 입력/보기. 답변 유형에 맞는 입력 UI를 보여준다.
 const props = defineProps({
@@ -16,49 +16,49 @@ const groups = computed(() => db.items.filter((it) => it.stages.includes(props.s
 const activeChoices = (q) => q.choices.filter((c) => !c.deleted)
 const choiceLabel = (q, id) => {
   const c = q.choices.find((x) => x.id === id)
-  if (!c) return '(알 수 없는 선택지)'
-  return c.deleted ? `${c.label} (삭제된 선택지)` : c.label
+  if (!c) return t('as.unknownChoice')
+  return c.deleted ? t('as.deletedChoice', { label: dt(c.label) }) : dt(c.label)
 }
 const empty = (v) => v === undefined || v === null || String(v).trim() === ''
 </script>
 
 <template>
   <div class="answer-sheet">
-    <div v-if="!groups.length" class="empty-hint">이 평가 단계에 등록된 문항이 없습니다.</div>
+    <div v-if="!groups.length" class="empty-hint">{{ t('as.empty') }}</div>
     <section v-for="g in groups" :key="g.item.id" class="item-block">
-      <h3 class="item-title">{{ g.item.name }} <span v-if="typeof g.item.points === 'number'" class="text-muted small">배점 {{ g.item.points }}점</span></h3>
+      <h3 class="item-title">{{ dt(g.item.name) }} <span v-if="typeof g.item.points === 'number'" class="text-muted small">{{ t('as.points', { n: g.item.points }) }}</span></h3>
       <div v-for="(q, qi) in g.questions" :key="q.id" class="q" :class="{ problem: problemIds.includes(q.id) }" :data-question="q.id">
         <div class="q-text">
-          {{ qi + 1 }}. {{ q.text }}
-          <span v-if="q.required" class="text-danger" title="필수">*</span>
-          <span class="badge text-bg-light border ms-1">{{ answerTypeLabel(q.type) }}</span>
+          {{ qi + 1 }}. {{ dt(q.text) }}
+          <span v-if="q.required" class="text-danger" :title="t('as.required')">*</span>
+          <span class="badge text-bg-light border ms-1">{{ answerTypeName(q.type) }}</span>
         </div>
 
         <template v-if="readonly">
           <div class="answer-view">
-            <span v-if="empty(answers[q.id])" class="text-muted">미응답</span>
+            <span v-if="empty(answers[q.id])" class="text-muted">{{ t('as.unanswered') }}</span>
             <template v-else-if="q.type === 'choice'">{{ choiceLabel(q, answers[q.id]) }}</template>
             <span v-else class="pre">{{ answers[q.id] }}</span>
           </div>
         </template>
 
         <template v-else>
-          <div v-if="q.type === 'choice'" class="choices" role="radiogroup" :aria-label="q.text">
+          <div v-if="q.type === 'choice'" class="choices" role="radiogroup" :aria-label="dt(q.text)">
             <label v-for="c in activeChoices(q)" :key="c.id" class="choice" :class="{ on: answers[q.id] === c.id }">
               <input v-model="answers[q.id]" type="radio" :name="`${idPrefix}-${q.id}`" :value="c.id" class="form-check-input" />
-              {{ c.label }}
+              {{ dt(c.label) }}
             </label>
             <div v-if="answers[q.id] && !activeChoices(q).some((c) => c.id === answers[q.id])" class="small text-danger w-100">
-              전에 고른 '{{ choiceLabel(q, answers[q.id]) }}'은(는) 더 이상 쓸 수 없습니다. 다시 선택해 주세요.
+              {{ t('as.choiceGone', { label: choiceLabel(q, answers[q.id]) }) }}
             </div>
           </div>
           <template v-else-if="q.type === 'short'">
-            <input v-model="answers[q.id]" class="form-control" :maxlength="q.maxLength || null" placeholder="짧게 입력하세요" :aria-label="q.text" />
+            <input v-model="answers[q.id]" class="form-control" :maxlength="q.maxLength || null" :placeholder="t('as.shortPh')" :aria-label="dt(q.text)" />
           </template>
           <template v-else>
-            <textarea v-model="answers[q.id]" class="form-control" rows="4" :maxlength="q.maxLength || null" placeholder="자세히 입력하세요" :aria-label="q.text"></textarea>
+            <textarea v-model="answers[q.id]" class="form-control" rows="4" :maxlength="q.maxLength || null" :placeholder="t('as.longPh')" :aria-label="dt(q.text)"></textarea>
           </template>
-          <div v-if="q.type !== 'choice' && q.maxLength" class="small text-muted text-end">{{ (answers[q.id] || '').length }} / {{ q.maxLength }}자</div>
+          <div v-if="q.type !== 'choice' && q.maxLength" class="small text-muted text-end">{{ t('as.chars', { n: (answers[q.id] || '').length, max: q.maxLength }) }}</div>
         </template>
       </div>
     </section>

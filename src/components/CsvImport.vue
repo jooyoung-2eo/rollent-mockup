@@ -94,10 +94,12 @@ function teamIdFor(name) {
   if (!t) {
     t = { id: newId(), name, kind: 'dept' }
     db.teams.push(t)
+    createdTeams.add(t.id)
   }
   return t.id
 }
 
+const createdTeams = new Set()
 function apply() {
   const res = { created: [], updated: [], skipped: [], kept: [], failed: [] }
   rows.value.forEach((r) => {
@@ -116,6 +118,11 @@ function apply() {
       res.created.push(r)
     }
   })
+  // 이번에 새로 만든 부서 중 임원만 있는 곳은 임원 그룹(경영진)으로 표시한다
+  db.teams.filter((t) => createdTeams.has(t.id)).forEach((t) => {
+    const list = db.users.filter((u) => u.teamId === t.id)
+    t.kind = list.length && list.every((u) => u.role === 'exec') ? 'exec' : 'dept'
+  })
   result.value = res
   toast(`CSV 처리 완료: 신규 ${res.created.length}명, 변경 ${res.updated.length}명, 건너뜀 ${res.skipped.length + res.kept.length}명, 실패 ${res.failed.length}건`)
 }
@@ -133,8 +140,9 @@ function apply() {
     </p>
     <p class="small mb-3">
       샘플:
-      <a :href="sampleBase + 'employees-34.csv'" download>초기 직원 34명</a> ·
-      <a :href="sampleBase + 'employees-new-and-conflict.csv'" download>신규·충돌·오류 예시</a>
+      <a :href="sampleBase + 'employees-32.csv'" download>초기 직원 32명</a> ·
+      <a :href="sampleBase + 'employees-new-and-conflict.csv'" download>신규·충돌·오류 예시</a> ·
+      <a :href="sampleBase + 'hr-data-sample.csv'" download>인사 데이터 예시(새 조직 39명)</a>
     </p>
 
     <div v-if="parseError" class="alert alert-danger py-2 small">{{ parseError }}</div>

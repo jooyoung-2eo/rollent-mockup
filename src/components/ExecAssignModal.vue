@@ -14,6 +14,20 @@ const assignable = computed(() => sortUsers(db.users.filter((u) => isEvalTarget(
 const current = () => assignable.value.filter((u) => db.execAssign[u.id] === props.execId).map((u) => u.id)
 const checked = ref(current())
 const q = ref('')
+// 팀별 선택: 팀을 체크하면 그 팀의 평가 대상 사원·팀장이 모두 체크된다
+const mode = ref('team')
+const teamGroups = computed(() => db.teams
+  .map((t) => ({ team: t, users: assignable.value.filter((u) => u.teamId === t.id) }))
+  .filter((g) => g.users.length))
+const teamState = (g) => {
+  const n = g.users.filter((u) => checked.value.includes(u.id)).length
+  return n === 0 ? 'none' : n === g.users.length ? 'all' : 'some'
+}
+function toggleTeam(g) {
+  const ids = g.users.map((u) => u.id)
+  checked.value = teamState(g) === 'all' ? checked.value.filter((id) => !ids.includes(id)) : [...new Set([...checked.value, ...ids])]
+}
+const othersIn = (g) => [...new Set(g.users.filter((u) => db.execAssign[u.id] && db.execAssign[u.id] !== props.execId).map((u) => userById(db.execAssign[u.id])?.name).filter(Boolean))]
 const shown = computed(() => assignable.value.filter((u) => !q.value.trim() || u.name.includes(q.value.trim()) || teamName(u.teamId).includes(q.value.trim())))
 
 async function save() {
@@ -37,6 +51,26 @@ async function save() {
       체크한 사원·팀장을 이 임원이 평가합니다. 체크를 풀면 배정만 해제되고 직원 정보는 지워지지 않습니다.
       한 직원은 임원 한 명에게만 배정됩니다(복수 배정은 정책이 정해지지 않아 지원하지 않음).
     </p>
+    <div class="btn-group btn-group-sm mb-2" role="group" aria-label="선택 방식">
+      <button type="button" class="btn" :class="mode === 'team' ? 'btn-primary' : 'btn-outline-primary'" @click="mode = 'team'">팀별 선택</button>
+      <button type="button" class="btn" :class="mode === 'person' ? 'btn-primary' : 'btn-outline-primary'" @click="mode = 'person'">개인별 선택</button>
+    </div>
+    <div v-if="mode === 'team'" class="assign-list" data-testid="assign-teams">
+      <label v-for="g in teamGroups" :key="g.team.id" class="assign-row" :data-team="g.team.name">
+        <input
+          class="form-check-input" type="checkbox"
+          :checked="teamState(g) === 'all'" :indeterminate.prop="teamState(g) === 'some'"
+          :aria-label="`${g.team.name} 전체 선택`" @change="toggleTeam(g)"
+        />
+        <span class="fw-semibold">{{ g.team.name }}</span>
+        <span class="small text-muted">{{ g.users.filter((u) => checked.includes(u.id)).length }} / {{ g.users.length }}명</span>
+        <span class="ms-auto small" :class="othersIn(g).length ? 'text-warning-emphasis' : 'text-muted'">
+          {{ othersIn(g).length ? `일부 ${othersIn(g).join('·')} 담당` : '' }}
+        </span>
+      </label>
+      <p class="small text-muted mt-2 mb-0">팀을 체크하면 그 팀의 사원·팀장이 모두 선택됩니다. 일부만 고르려면 '개인별 선택'을 쓰세요.</p>
+    </div>
+    <template v-else>
     <input v-model="q" class="form-control form-control-sm mb-2" placeholder="이름·부서 검색" aria-label="배정 대상 검색" />
     <div class="assign-list">
       <label v-for="u in shown" :key="u.id" class="assign-row" :data-user="u.name">
@@ -49,6 +83,7 @@ async function save() {
         </span>
       </label>
     </div>
+    </template>
     <template #footer>
       <span class="small text-muted me-auto">{{ checked.length }}명 선택</span>
       <button class="btn btn-light" @click="emit('close')">취소</button>

@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { store, confirmDialog, logout, currentUser, teamName } from '../store'
-import { roleLabel } from '../constants'
+import { t, roleName, dt } from '../i18n'
 import RollentLogo from './RollentLogo.vue'
 
 const router = useRouter()
@@ -14,18 +14,18 @@ const ADMIN_MENUS = [
   { to: '/kpi', label: '부서 KPI 관리' },
   { to: '/results', label: '평가 결과' },
 ]
-const USER_MENUS = [{ to: '/me', label: '내 평가' }]
+const USER_MENUS = [{ to: '/me', key: 'nav.myEval' }]
 
 const isAdmin = computed(() => store.session?.kind === 'admin')
-const menus = computed(() => (isAdmin.value ? ADMIN_MENUS : USER_MENUS))
+const menus = computed(() => (isAdmin.value ? ADMIN_MENUS : USER_MENUS.map((m) => ({ ...m, label: t(m.key) }))))
 const who = computed(() => {
   const u = currentUser()
   if (!u) return ''
-  return isAdmin.value ? `${u.name}${u.canOverride ? ' · 직접 수정 권한' : ''}` : `${u.name} · ${teamName(u.teamId)} ${roleLabel(u.role)}`
+  return isAdmin.value ? `${u.name}${u.canOverride ? ' · 직접 수정 권한' : ''}` : `${u.name} · ${dt(teamName(u.teamId))} ${roleName(u.role)}`
 })
 
 async function onLogout() {
-  const ok = await confirmDialog({ title: '로그아웃', message: '로그아웃하시겠습니까?', okText: '로그아웃' })
+  const ok = await confirmDialog({ title: t('nav.logout'), message: t('nav.logoutAsk'), okText: t('nav.logout') })
   if (!ok) return
   logout()
   router.push('/login')
@@ -44,7 +44,7 @@ async function onLogout() {
         {{ m.label }}
       </RouterLink>
     </nav>
-    <button type="button" class="menu-item logout" @click="onLogout">로그아웃</button>
+    <button type="button" class="menu-item logout" @click="onLogout">{{ t('nav.logout') }}</button>
   </aside>
 </template>
 

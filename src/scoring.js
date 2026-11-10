@@ -1,8 +1,8 @@
 import { db, stagesFor, evaluatorsFor, getEvaluation, stageStatus, targetStatus, isEvalTarget } from './store'
-import { GRADES, POLICY_OPTIONS } from './constants'
+import { GRADES, POLICY_OPTIONS, ROLE_RATIO_ELEMENTS, RATIO_ELEMENTS } from './constants'
 
 // 평가 결과 계산 파이프라인
-// 응답 → 항목 점수 → 단계 점수 → 가중치 적용 → 백분위 → 부서 KPI → 개인 조정 → 등급
+// 응답 → 항목 점수 → 단계 점수 → 가중치 적용(개인평가) → 부서 KPI 반영 → 보정 → 직접 수정 → 등급
 // 정해지지 않은 정책이 있으면 숫자를 만들지 않고 { value: null, reason } 으로 이유를 남긴다.
 
 const ok = (value) => ({ value, reason: null })
@@ -82,83 +82,91 @@ export function weightCheck(role, stages) {
   return { valid: true, reason: null }
 }
 
-// 결과 산출 대상: 활성 평가 대상자 중 사원·팀장 (임원은 자기평가만 진행)
-export const resultTargets = () => db.users.filter((u) => isEvalTarget(u) && (u.role === 'member' || u.role === 'leader'))
+// 결과 산출 대상: 활성 평가 대상자 (임원은 상향평가가 생겨 결과 산출 대상에 포함)
+export const resultTargets = () => db.users.filter((u) => isEvalTarget(u) && stagesFor(u).length)
 
+// 개인평가 점수: 켜진 1·2·3차 단계 점수를 단계 가중치로 합친다
+// (팀장은 자기·팀원(상향)·임원평가, 임원은 자기·상향평가)
 function personBase(t) {
   const stages = stagesFor(t)
   const stageRows = stages.map((s) => stageResult(t, s))
-  const wc = weightCheck(t.role, stages)
   let weighted
   const stageBad = stageRows.find((r) => r.score100.value === null)
   if (stageBad) weighted = pending(stageBad.score100.reason)
-  else if (!wc.valid) weighted = pending(wc.reason)
-  else weighted = ok(round2(stageRows.reduce((a, r) => a + (r.score100.value * db.weights[t.role][r.stage]) / 100, 0)))
-  return { user: t, status: targetStatus(t), stages: stageRows, weights: stages.map((s) => ({ stage: s, weight: db.weights[t.role]?.[s] ?? null })), weighted }
-}
-
-// 백분위: 개인평가 점수(가중치 적용 점수) 기준. KPI·보정 결과와는 별개의 값이다.
-function percentileOf(row, rows) {
-  const s = db.settings
-  if (row.weighted.value === null) return pending(row.weighted.reason)
-  const missing = [
-    !s.percentileMethod && '산출 공식', !s.percentileGroup && '비교 집단',
-    !s.percentileTies && '동점자 처리', !s.percentileExclusion && '비교 대상 제외 기준',
-  ].filter(Boolean)
-  if (missing.length) return pending(`백분위 ${missing.join('·')} 미설정`)
-  // 비교 대상 제외 기준 'completeOnly': 3단계 평가가 끝나 개인평가 점수가 있는 사람만 비교한다
-  const peers = rows.filter((r) => r.weighted.value !== null && (s.percentileGroup === 'all'
-    || (s.percentileGroup === 'team' && r.user.teamId === row.user.teamId)
-    || (s.percentileGroup === 'role' && r.user.role === row.user.role)))
-  const n = peers.length
-  const v = row.weighted.value
-  const below = peers.filter((p) => p.weighted.value < v).length
-  const equal = peers.filter((p) => p.weighted.value === v).length // 본인 포함
-  if (s.percentileMethod === 'pr') {
-    const tie = s.percentileTies === 'midpoint' ? equal * 0.5 : equal
-    return ok(round2(((below + tie) / n) * 100))
+  else {
+    const wc = weightCheck(t.role, stages)
+    weighted = wc.valid ? ok(round2(stageRows.reduce((a, r) => a + (r.score100.value * db.weights[t.role][r.stage]) / 100, 0))) : pending(wc.reason)
   }
-  if (n < 2) return pending('비교 집단 인원 부족(2명 이상 필요)')
-  const higher = n - below - equal
-  const rank = s.percentileTies === 'midpoint' ? higher + (equal + 1) / 2 : higher + 1
-  return ok(round2(((n - rank) / (n - 1)) * 100))
+  const weights = stages.map((s) => ({ stage: s, weight: db.weights[t.role]?.[s] ?? null }))
+  return { user: t, status: targetStatus(t), stages: stageRows, weights, weighted }
 }
 
-function kpiOf(row) {
-  const { kpiMethod: method, kpiBase: baseKey, kpiMixRatio } = db.settings
-  // 개인평가 점수가 없으면(평가 미완료 등) 정책 미설정보다 그 이유를 먼저 보여준다
-  if (row.weighted.value === null) return { base: row.weighted, kpi: null, after: pending(row.weighted.reason) }
-  if (!method) return { base: pending('KPI 반영 방식 미설정'), kpi: null, after: pending('KPI 반영 방식 미설정') }
-  if (!baseKey) return { base: pending('KPI 기준 점수 미설정'), kpi: null, after: pending('KPI 기준 점수 미설정') }
-  const base = baseKey === 'weighted' ? row.weighted : row.percentile
-  if (base.value === null) return { base, kpi: null, after: pending(base.reason) }
-  if (method === 'none') return { base, kpi: null, after: ok(base.value) }
-  const kpi = db.kpiScores[row.user.teamId]
-  if (typeof kpi !== 'number') return { base, kpi: null, after: pending(`${row.teamName} KPI 점수 미입력`) }
-  if (method === 'multiply') return { base, kpi, after: ok(round2(base.value * (kpi / 100))) }
-  if (typeof kpiMixRatio !== 'number') return { base, kpi, after: pending('KPI 반영 비율 미설정') }
-  const r = kpiMixRatio / 100
-  return { base, kpi, after: ok(round2(base.value * (1 - r) + kpi * r)) }
+// ---- 팀 KPI ----
+// 지표 달성률: 높을수록 좋음 = 실적 ÷ 목표, 낮을수록 좋음 = 목표 ÷ 실적. 환산점수는 달성률(최대 100).
+const isNum = (v) => typeof v === 'number' && Number.isFinite(v)
+export function indicatorRate(i) {
+  if (!isNum(i.target) || !isNum(i.actual) || i.target <= 0 || i.actual < 0) return null
+  if (i.direction === 'lower') return i.actual === 0 ? null : (i.target / i.actual) * 100
+  return (i.actual / i.target) * 100
+}
+export const indicatorScore = (i) => {
+  const r = indicatorRate(i)
+  return r === null ? null : Math.min(r, 100)
+}
+export const teamKpiData = (teamId) => db.teamKpi[db.period.id]?.[teamId] ?? null
+export function teamKpiOf(teamId) {
+  const t = teamKpiData(teamId)
+  if (!t) return pending('팀 KPI 미입력')
+  if (t.mode === 'direct') return isNum(t.direct) ? ok(round2(t.direct)) : pending('팀 KPI 직접 입력값 없음')
+  const list = t.indicators ?? []
+  if (!list.length) return pending('팀 KPI 지표 없음')
+  const sum = round2(list.reduce((a, i) => a + (Number(i.weight) || 0), 0))
+  if (sum !== 100) return pending(`팀 KPI 가중치 합계 ${sum}% (100% 필요)`)
+  let total = 0
+  for (const i of list) {
+    const c = indicatorScore(i)
+    if (c === null) return pending(`'${i.name}' 목표·실적 확인 필요`)
+    total += (c * i.weight) / 100
+  }
+  return ok(round2(total))
 }
 
-// 부서별·개인별 보정. 보정값은 KPI 반영 후 점수에 더하는 점수(±)로 저장한다.
-// 두 값을 함께 쓰는 규칙(correctionRule)이 정해지기 전에는 최종 점수에 반영하지 않고,
-// 각 값을 하나씩 적용했을 때의 예상 점수만 보여준다.
-// applied: 'none' 보정값 없음 · 'saved' 저장됐지만 미적용 · 'applied' 적용됨 · 'pending' 앞 단계 보류
+// 직급별 비율 검사
+export function ratioCheck(role, ratios = db.roleRatios[role]) {
+  const els = (ROLE_RATIO_ELEMENTS[role] ?? []).filter((e) => ratios?.[e]?.on)
+  if (!els.length) return { valid: false, reason: '직급별 비율 미설정', els }
+  if (els.some((e) => !isNum(ratios[e].value) || ratios[e].value < 0)) return { valid: false, reason: '직급별 비율 값 확인 필요', els }
+  const sum = round2(els.reduce((a, e) => a + ratios[e].value, 0))
+  if (sum !== 100) return { valid: false, reason: `직급별 비율 합계 ${sum}% (100% 필요)`, els }
+  return { valid: true, reason: null, els }
+}
+export const ratioText = (role) => {
+  const c = ratioCheck(role)
+  return c.valid ? c.els.map((e) => `${RATIO_ELEMENTS[e].label} ${db.roleRatios[role][e].value}%`).join(' · ') : c.reason
+}
+
+// 개인평가 점수에 팀 KPI 실적을 직급별 비율로 반영한다 (보정 전 점수)
+function ratioOf(row) {
+  const kpi = teamKpiOf(row.user.teamId)
+  const parts = { personal: row.weighted, kpi }
+  const c = ratioCheck(row.user.role)
+  const base = { kpi }
+  if (!c.valid) return { ...base, after: pending(c.reason) }
+  const bad = c.els.find((e) => parts[e].value === null)
+  if (bad) return { ...base, after: pending(parts[bad].reason) }
+  return { ...base, after: ok(round2(c.els.reduce((a, e) => a + (parts[e].value * db.roleRatios[row.user.role][e].value) / 100, 0))) }
+}
+
+// 개인별 보정. 보정값은 부서 KPI 반영 후 점수에 더하는 점수(±)이며, 저장하면 바로 반영된다.
+// applied: 'none' 보정값 없음 · 'applied' 적용됨 · 'pending' 앞 단계 보류
 export function correctionOf(row) {
-  const dept = db.deptCorrections[row.user.teamId] ?? null
   const person = db.personCorrections[row.user.id] ?? null
   const before = row.kpiAfter
-  const dv = dept ? dept.value : null
   const pv = person ? person.value : null
-  const expect = (v) => (before.value === null || v === null ? null : round2(before.value + v))
-  const base = { dept: dv, deptReason: dept?.reason ?? '', person: pv, personReason: person?.reason ?? '', before, expectDept: expect(dv), expectPerson: expect(pv) }
+  const base = { person: pv, personReason: person?.reason ?? '', before }
   if (before.value === null) return { ...base, after: pending(before.reason), applied: 'pending' }
-  if (dv === null && pv === null) return { ...base, after: ok(before.value), applied: 'none' }
-  const rule = db.settings.correctionRule
-  if (!rule) return { ...base, after: pending('보정 적용 규칙 미설정'), applied: 'saved' }
-  const add = rule === 'sum' ? (dv ?? 0) + (pv ?? 0) : pv !== null ? pv : dv
-  return { ...base, after: ok(round2(before.value + add)), applied: 'applied' }
+  if (pv === null) return { ...base, after: ok(before.value), applied: 'none' }
+  return { ...base, after: ok(round2(before.value + pv)), applied: 'applied' }
 }
 
 // 최종 점수 직접 수정. 보정 결과를 덮어쓰지 않고 따로 둔 값으로 최종 점수를 정한다.
@@ -173,6 +181,12 @@ function overrideOf(row) {
 
 export function gradeCheck() {
   const g = db.settings.grade
+  if (g.mode === 'absolute') {
+    const c = g.cutoffs ?? {}
+    if (['A', 'B', 'C'].some((k) => typeof c[k] !== 'number')) return { valid: false, reason: '절대평가 등급 기준 점수 미설정' }
+    if (!(c.A > c.B && c.B > c.C)) return { valid: false, reason: '등급 기준 점수는 A > B > C 순이어야 함' }
+    return { valid: true, reason: null }
+  }
   const values = GRADES.map((k) => g.ratios[k])
   if (values.some((v) => typeof v !== 'number')) return { valid: false, reason: '등급 비율 미설정' }
   const sum = values.reduce((a, b) => a + b, 0)
@@ -192,6 +206,11 @@ function assignGrades(rows) {
   })
   if (!check.valid || !eligible.length) return
   const g = db.settings.grade
+  // 절대평가: 최종 점수가 기준 점수 이상이면 그 등급 (C 기준 미만은 D)
+  if (g.mode === 'absolute') {
+    eligible.forEach((r) => { r.grade = ok(['A', 'B', 'C'].find((k) => r.final.value >= g.cutoffs[k]) ?? 'D') })
+    return
+  }
   const roundFn = Math[g.rounding]
   const n = eligible.length
   let cum = 0
@@ -212,12 +231,12 @@ function assignGrades(rows) {
 export function computeResults() {
   const rows = resultTargets().map(personBase)
   rows.forEach((r) => { r.teamName = db.teams.find((t) => t.id === r.user.teamId)?.name ?? '미배정' })
-  rows.forEach((r) => { r.percentile = percentileOf(r, rows) })
   rows.forEach((r) => {
-    const k = kpiOf(r)
-    r.kpiBefore = k.base
-    r.kpiScore = k.kpi
-    r.kpiAfter = k.after
+    const k = ratioOf(r)
+    r.kpiBefore = r.weighted // 개인평가 점수
+    r.teamKpi = k.kpi
+    r.kpiScore = k.kpi.value
+    r.kpiAfter = k.after // 직급별 비율 반영 점수 (보정 전)
   })
   rows.forEach((r) => {
     r.corr = correctionOf(r)
@@ -238,15 +257,11 @@ export function snapshotOf(row) {
     stages: row.stages.map((s) => ({ stage: s.stage, raw: v(s.raw), max: s.max, score100: v(s.score100), items: s.items.map((i) => ({ itemId: i.item.id, name: i.item.name, points: i.item.points, score: v(i.score) })) })),
     weights: row.weights.map((w) => ({ ...w })),
     weighted: v(row.weighted),
-    percentile: v(row.percentile),
-    percentileRule: ['percentileMethod', 'percentileGroup', 'percentileTies', 'percentileExclusion'].map((k) => policyName(k, db.settings[k])).join(' / '),
     kpiBefore: v(row.kpiBefore),
     kpiScore: row.kpiScore,
     kpiAfter: v(row.kpiAfter),
-    kpiRule: policyName('kpiMethod', db.settings.kpiMethod),
-    deptCorrection: row.corr.dept === null ? null : { value: row.corr.dept, reason: row.corr.deptReason },
+    kpiRule: ratioText(row.user.role),
     personCorrection: row.corr.person === null ? null : { value: row.corr.person, reason: row.corr.personReason },
-    correctionRule: policyName('correctionRule', db.settings.correctionRule),
     corrected: v(row.corrected),
     override: row.override ? { ...row.override } : null,
     final: v(row.final),
@@ -263,7 +278,8 @@ export function policyName(group, key) {
 export function gradeRuleText() {
   const g = db.settings.grade
   if (!gradeCheck().valid) return '미설정'
-  return `A ${g.ratios.A}% · B ${g.ratios.B}% · C ${g.ratios.C}% · D ${g.ratios.D}% / 인원 ${policyName('gradeRounding', g.rounding)} / ${policyName('gradeTies', g.ties)}`
+  if (g.mode === 'absolute') return `절대평가 / A ${g.cutoffs.A}점 이상 · B ${g.cutoffs.B}점 이상 · C ${g.cutoffs.C}점 이상 · D ${g.cutoffs.C}점 미만`
+  return `상대평가 / A ${g.ratios.A}% · B ${g.ratios.B}% · C ${g.ratios.C}% · D ${g.ratios.D}% / 인원 ${policyName('gradeRounding', g.rounding)} / ${policyName('gradeTies', g.ties)}`
 }
 
 // 확정값과 현재 계산값이 다른지 (재계산 필요 표시용)
@@ -271,10 +287,10 @@ export function snapshotDiffers(row) {
   const f = db.finalized[row.user.id]
   if (!f) return false
   const now = snapshotOf(row)
-  return ['weighted', 'percentile', 'kpiAfter', 'corrected', 'final', 'grade'].some((k) => f.values[k] !== now[k])
+  return ['weighted', 'kpiAfter', 'corrected', 'final', 'grade'].some((k) => f.values[k] !== now[k])
 }
 
-// 이 직원의 점수에 영향을 준 변경 이력(본인 보정·직접 수정 + 소속 부서 보정)
+// 이 직원의 점수에 영향을 준 변경 이력(본인 보정·직접 수정)
 export function auditFor(user) {
-  return db.auditLog.filter((a) => a.userId === user.id || (a.kind === 'dept' && a.teamId === user.teamId))
+  return db.auditLog.filter((a) => a.userId === user.id)
 }

@@ -1,5 +1,6 @@
 <script setup>
 import { onMounted, onBeforeUnmount } from 'vue'
+import { t } from '../i18n'
 
 const props = defineProps({
   title: { type: String, default: '' },
@@ -20,7 +21,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
     <div class="modal-box" :style="{ maxWidth: widths[props.size] }" role="dialog" aria-modal="true">
       <div class="modal-box-head">
         <h5 class="m-0 fw-bold">{{ title }}</h5>
-        <button type="button" class="btn-close" aria-label="닫기" @click="emit('close')"></button>
+        <button type="button" class="btn-close" :aria-label="t('common.close')" @click="emit('close')"></button>
       </div>
       <div class="modal-box-body">
         <slot />
