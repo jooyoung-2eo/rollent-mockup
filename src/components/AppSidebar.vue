@@ -36,7 +36,7 @@ async function onLogout() {
   <aside class="sidebar">
     <div class="brand">
       <RollentLogo :size="52" />
-      <div class="brand-name">Rollent</div>
+      <div class="brand-name">ROLLENT</div>
       <div class="who">{{ who }}</div>
     </div>
     <nav class="menu">
@@ -62,7 +62,7 @@ async function onLogout() {
   height: 100vh;
 }
 .brand { display: flex; flex-direction: column; align-items: center; gap: 8px; margin-bottom: 28px; }
-.brand-name { font-weight: 700; font-size: 1.25rem; letter-spacing: 0.02em; }
+.brand-name { font-family: Georgia, "Times New Roman", serif; font-weight: 400; font-size: 1.3rem; letter-spacing: 0.12em; }
 .who { font-size: 0.78rem; color: #b9bde0; text-align: center; padding: 0 10px; }
 .menu { display: flex; flex-direction: column; gap: 2px; flex: 1; }
 .menu-item {

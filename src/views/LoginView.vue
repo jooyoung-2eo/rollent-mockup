@@ -61,7 +61,7 @@ function selectLang(item) {
     <form class="login-card" novalidate @submit.prevent="onSubmit">
       <div class="text-center mb-4">
         <RollentLogo :size="72" />
-        <h1 class="brand">Rollent</h1>
+        <h1 class="brand">ROLLENT</h1>
       </div>
 
       <label class="form-label small" for="loginName">아이디 (이름)</label>
@@ -120,7 +120,7 @@ function selectLang(item) {
 <style scoped>
 .login-page { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; background: var(--surface); }
 .login-card { width: 100%; max-width: 380px; background: var(--navy); color: #fff; border-radius: 14px; padding: 36px 32px 24px; box-shadow: 0 12px 40px rgba(20, 24, 60, 0.25); }
-.brand { font-size: 1.6rem; font-weight: 700; margin: 10px 0 0; }
+.brand { font-family: Georgia, "Times New Roman", serif; font-size: 1.7rem; font-weight: 400; letter-spacing: 0.14em; margin: 12px 0 0; }
 .form-label { color: #c9cce6; }
 .login-error { color: #ffb4b4; font-size: 0.85rem; }
 .lang-menu { position: absolute; right: 0; bottom: calc(100% + 4px); list-style: none; padding: 4px; margin: 0; background: #fff; border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2); min-width: 120px; z-index: 10; }
